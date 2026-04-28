@@ -1,0 +1,22 @@
+# Rust / Tauri build artifacts
+target/
+src-tauri/target/
+
+# Frontend build artifacts
+node_modules/
+dist/
+build/
+
+# IDE / editor settings
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local environment / secrets
+.env
+.env.local
