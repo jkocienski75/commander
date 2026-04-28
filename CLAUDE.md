@@ -83,7 +83,7 @@ If the operator requests work that depends on any of these and the request is do
 | EXILE.md | v0.3 complete |
 | RAPPORT-STATE-MODEL.md | v0.2 complete |
 | ADR-0011 | Accepted |
-| mvp/coo.md | Drafted |
+| mvp/coo.md | Committed (doctrine c170f73) |
 | Tauri vs. Electron | Decided — Tauri |
 | AI runtime | Decided — Anthropic Claude API + abstraction |
 | Exile character art generation | Pending — own session |

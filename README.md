@@ -13,7 +13,7 @@ COO is an independent product in the workspace per [ADR-0011](../doctrine/decisi
 | `doctrine/EXILE.md` | v0.3 complete |
 | `doctrine/RAPPORT-STATE-MODEL.md` | v0.2 complete |
 | `../doctrine/decisions/0011-coo-as-independent-product.md` | Accepted |
-| `../doctrine/mvp/coo.md` | Drafted |
+| `../doctrine/mvp/coo.md` | Committed (doctrine c170f73) |
 | Tauri vs. Electron | Decided — Tauri |
 | AI runtime | Decided — Anthropic Claude API + abstraction |
 | Exile character art generation | Pending — own session |
