@@ -1,5 +1,6 @@
 mod crypto;
 mod db;
+mod vault;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
