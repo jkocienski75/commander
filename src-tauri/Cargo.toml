@@ -25,4 +25,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 rusqlite_migration = "1"
 dirs = "5"
 thiserror = "1"
+argon2 = { version = "0.5", features = ["std"] }
+zeroize = "1"
+getrandom = { version = "0.2", features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"
 

@@ -1,3 +1,4 @@
+mod crypto;
 mod db;
 
 #[tauri::command]
