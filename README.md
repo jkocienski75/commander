@@ -22,7 +22,7 @@ COO is an independent product in the workspace per [ADR-0011](../doctrine/decisi
 |---|---|
 | §1 Tauri scaffolding + SQLite + migrations wired | ✅ Shipped 2026-04-28 |
 | §2 Encrypted state at rest | ✅ Shipped 2026-04-29 — (a) Argon2id KDF + (b) HKDF derive + (c) XChaCha20-Poly1305 envelope |
-| §3 Onboarding wizard | Not started |
+| §3 Onboarding wizard | 🟡 (a) shipped 2026-04-29 — vault lock/unlock + passphrase sentinel; (b)/(c)/(d) pending |
 | §4 Channel surface | Not started |
 | §5 Inference abstraction layer | Not started |
 | §6 State surfaces (Station, Dossier, Briefs, Kit, Calibration) | Not started |
@@ -49,7 +49,7 @@ If you are landing in this repository — a new Claude Code session, a different
 - **Frontend:** React + TypeScript + Vite (chosen at Phase 1 §1 entry, 2026-04-28; not gated by doctrine)
 - **Local SQLite** under `~/.coo/coo.db` via `rusqlite` 0.32 (bundled, statically linked)
 - **Migrations** via `rusqlite_migration` 1.x — append-only discipline per `doctrine/RAPPORT-STATE-MODEL.md` §7
-- **Encrypted at rest** — per-domain encryption with operator-derived master key (Phase 1 §2, closed 2026-04-29). Argon2id KDF (m=65536, t=3, p=1) + HKDF-SHA256 per-domain derivation + XChaCha20-Poly1305 AEAD envelope (24-byte nonce, 6-byte header bound as AAD). Substrate ready for §3 to consume.
+- **Encrypted at rest** — per-domain encryption with operator-derived master key (Phase 1 §2, closed 2026-04-29). Argon2id KDF (m=65536, t=3, p=1) + HKDF-SHA256 per-domain derivation + XChaCha20-Poly1305 AEAD envelope (24-byte nonce, 6-byte header bound as AAD). §3 (a) wired the vault layer on 2026-04-29: passphrase sentinel at `~/.coo/sentinel` + `vault::setup_passphrase`/`vault::unlock` state machine, with `crypto::derive_lock_key` (HKDF info `coo/v1/lock`) sibling to the four state-domain derivations.
 - **Anthropic Claude API** for inference at MVP, behind an abstraction layer enabling provider swap (Phase 1 §5; not yet implemented)
 - **No Docker.** Native desktop application.
 
