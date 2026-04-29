@@ -3,8 +3,11 @@
 //   kdf       — Argon2id passphrase → MasterKey, salt file persistence
 //   (future)  — derive (HKDF master → per-domain), envelope (age)
 
+mod derive;
 mod kdf;
 
+#[allow(unused_imports)] // §3 will consume these
+pub use derive::{derive_domain_key, Domain, DomainKey};
 #[allow(unused_imports)] // §3 will consume these
 pub use kdf::{derive_master_key, read_or_init_salt, MasterKey, Salt};
 

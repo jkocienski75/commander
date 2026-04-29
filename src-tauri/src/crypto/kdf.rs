@@ -37,6 +37,16 @@ impl MasterKey {
     }
 }
 
+#[cfg(test)]
+impl MasterKey {
+    // Test-only constructor so sibling modules can write KATs without
+    // paying the Argon2id cost. Production callers must go through
+    // derive_master_key.
+    pub(crate) fn from_bytes_for_test(bytes: [u8; MASTER_KEY_BYTES]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Salt {
     bytes: [u8; SALT_BYTES],
