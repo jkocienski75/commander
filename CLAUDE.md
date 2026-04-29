@@ -79,6 +79,15 @@ If the operator requests work that depends on any of these and the request is do
 - **SQLite Rust crate** — `rusqlite` 0.32 with `bundled` feature (statically linked SQLite, no system dependency). Direct synchronous binding suits a local desktop app and is named directly in `RAPPORT-STATE-MODEL.md` §6.6.
 - **Migration runner** — `rusqlite_migration` 1.x. Lightweight, integrates directly with `rusqlite`, tracks `user_version` PRAGMA. First migration creates `_meta` table and sets the append-only precedent per `RAPPORT-STATE-MODEL.md` §7.
 
+### Resolved during Phase 1 §2 (2026-04-29)
+
+- **Argon2id parameters** — m=65536 (64 MiB), t=3, p=1. RFC 9106's "second recommended option" with parallelism reduced to 1 for portability; targets `RAPPORT-STATE-MODEL.md` §6.2's 250–500ms band on desktop hardware. Params are persisted into the salt file alongside the salt itself, so a future tuning change does not orphan existing installs (old salts re-derive their old keys).
+- **Salt file format** — 34-byte framed structure at `~/.coo/salt`: magic `COO1` + file version + kdf id + little-endian m/t/p costs + 16-byte salt. Plaintext per `RAPPORT-STATE-MODEL.md` §6.4. Magic, version, and kdf id are all checked on load; malformed files are rejected before any KDF work.
+- **`MasterKey` API** — `pub struct MasterKey(Zeroizing<[u8; 32]>)`. Only access path is `expose_secret() -> &[u8; 32]`. No `Debug`, no `Clone`, no public constructor; test sites use a `#[cfg(test)] pub(crate) MasterKey::from_bytes_for_test` so KATs do not pay the Argon2id cost on every test run. Production callers must go through `derive_master_key`.
+- **HKDF info-string namespace** — `coo/v1/kdf/<domain>` for each of the four `RAPPORT-STATE-MODEL.md` §1 domains (`rapport`, `friendship-floor`, `operator-knowledge`, `conversation`). The `v1` segment is the rotation hedge: bumping to `v2` is a controlled re-derivation event under the operator's passphrase, not a silent code change. Renaming any info string after data lands in production orphans every existing ciphertext for that domain — KATs in `crypto::derive` lock the strings against accidental change.
+- **HKDF salt** — `None`, per RFC 5869 §3.1. The `MasterKey` is already a uniform-random 32-byte output of Argon2id, so no extra HKDF salt is needed.
+- **Symmetric envelope crate — ChaCha20-Poly1305 (slice (c)).** This is a deliberate deviation from `RAPPORT-STATE-MODEL.md` §6.6's `age` recommendation. `age`'s primary modes (X25519 keypairs or scrypt-from-passphrase) do not naturally accept a 32-byte HKDF-derived domain key without either re-applying scrypt (wasteful, doubles KDF cost on every read) or deriving an indirection X25519 keypair (extra abstraction layer). ChaCha20-Poly1305 is the natural primitive for "AEAD given a 32-byte key" — same family used by Signal, WireGuard, TLS 1.3. Encryption granularity (per-domain with operator-derived master key) and the §6.4 plaintext/ciphertext split remain exactly as the doctrine specifies; only the envelope crate changes. See "Documentary debt to retire" below.
+
 ## Current Phase
 
 **Phase 1 — MVP build, in progress.** Phase 1 was unblocked at 2026-04-28 with Phase 0's final item (Exile character art) still operator-pending and asynchronous; engineering work proceeds in parallel.
@@ -96,7 +105,7 @@ If the operator requests work that depends on any of these and the request is do
 | Phase 1 item | Status |
 |---|---|
 | §1 Tauri scaffolding + SQLite + migrations wired | ✅ Shipped 2026-04-28 |
-| §2 Encrypted state at rest | Not started |
+| §2 Encrypted state at rest | 🟡 In progress — (a) Argon2id KDF + (b) HKDF derive shipped 2026-04-29; (c) AEAD envelope pending |
 | §3 Onboarding wizard | Not started |
 | §4 Channel surface | Not started |
 | §5 Inference abstraction layer | Not started |
@@ -105,9 +114,15 @@ If the operator requests work that depends on any of these and the request is do
 
 ## Current Implementation Status
 
-Read `README.md` for the authoritative current state. As of 2026-04-28 (Phase 1 §1 ship):
+Read `README.md` for the authoritative current state. As of 2026-04-29 (Phase 1 §2 (a) and (b) shipped):
 
 - ✅ **Tauri 2 + React/TS/Vite scaffold** at `coo/` root. Bundle identifier `com.digitaloverwatch.coo`; binary `coo.exe`; window title "COO". `cargo check` clean against Rust 1.95.0 MSVC; `npm install` clean (73 pkgs, 0 vulns).
 - ✅ **Local SQLite at `~/.coo/coo.db`** via `rusqlite` 0.32 (bundled, statically linked). Opened and migrated at app startup via Tauri `setup` hook (fail-fast on init error).
 - ✅ **Migration runner** via `rusqlite_migration` 1.x. First migration creates `_meta` table and inserts an `initialized_at` row. Migration validator unit test (`db::tests::migrations_pass_validation`) ships with §1 and exercises every migration's SQL against in-memory SQLite. Append-only discipline per `RAPPORT-STATE-MODEL.md` §7.
-- 🔜 **§2 next** — encryption at rest. Argon2id KDF + per-domain HKDF + age envelope encryption. Builds the crypto substrate that §3-§6 consume.
+- ✅ **§2 (a) Argon2id KDF + `MasterKey` + salt file** — `crypto::kdf` module. `derive_master_key(passphrase, &Salt) -> MasterKey` (Argon2id at m=65536, t=3, p=1) and `read_or_init_salt(path) -> Salt`. `MasterKey` is a `Zeroizing`-backed newtype with `expose_secret` as the only access path. 10 unit tests: KAT pinned for production parameters, determinism, passphrase/salt discrimination, salt-file round-trip, parent-dir auto-create, four malformed-file reject paths.
+- ✅ **§2 (b) HKDF per-domain key derivation** — `crypto::derive` module. `derive_domain_key(&MasterKey, Domain) -> DomainKey` over HKDF-SHA256 with `salt=None`. Four `Domain` variants matching `RAPPORT-STATE-MODEL.md` §1 (`Rapport`, `FriendshipFloor`, `OperatorKnowledge`, `Conversation`); info strings `coo/v1/kdf/<domain>`. 8 unit tests: RFC 5869 §A.1 Test Case 1 (validates upstream crate against the spec), pinned KAT per domain (4 tests — locks the info strings; renaming any orphans existing ciphertext for that domain), domain isolation, master discrimination, determinism.
+- 🔜 **§2 (c) next** — AEAD envelope. ChaCha20-Poly1305 (per "Resolved during Phase 1 §2" above) `encrypt(&DomainKey, plaintext) -> Vec<u8>` and `decrypt(&DomainKey, bundle) -> Result<Vec<u8>, CryptoError>`. After this lands, §2 closes and §3 (onboarding wizard) can consume the substrate.
+
+## Documentary debt to retire
+
+- **`RAPPORT-STATE-MODEL.md` §6.6 envelope crate recommendation.** §6.6 names `age` for envelope encryption. The §2 (c) implementation will use ChaCha20-Poly1305 instead — `age`'s primary modes do not naturally fit a 32-byte HKDF-derived domain key. Encryption granularity (per-domain), `MasterKey` derivation (Argon2id), domain-key derivation (HKDF), and the §6.4 plaintext/ciphertext split are unchanged from the doctrine; only the envelope crate differs. Reasoning is preserved in "Resolved during Phase 1 §2" above. Land in a v0.x minor of `RAPPORT-STATE-MODEL.md` when convenient — natural moment is §2 close or Phase 1 close.
