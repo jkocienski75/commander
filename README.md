@@ -6,7 +6,7 @@ COO is an independent product in the workspace per [ADR-0011](../doctrine/decisi
 
 ## Status
 
-**Phase 0 — Doctrine and design.** Implementation has not begun. The MVP scope contract is in [`../doctrine/mvp/coo.md`](../doctrine/mvp/coo.md).
+**Phase 1 — MVP build, in progress.** The MVP scope contract is in [`../doctrine/mvp/coo.md`](../doctrine/mvp/coo.md). Phase 1 was unblocked at 2026-04-28 while Phase 0's final item (Exile character art generation) remains operator-driven and asynchronous; engineering work proceeds in parallel.
 
 | Phase 0 item | Status |
 |---|---|
@@ -16,9 +16,17 @@ COO is an independent product in the workspace per [ADR-0011](../doctrine/decisi
 | `../doctrine/mvp/coo.md` | Committed (doctrine c170f73) |
 | Tauri vs. Electron | Decided — Tauri |
 | AI runtime | Decided — Anthropic Claude API + abstraction |
-| Exile character art generation | Pending — own session |
+| Exile character art generation | Pending — operator-driven |
 
-When the character art pass closes, Phase 0 is complete and Phase 1 (MVP build) begins per `../doctrine/mvp/coo.md`.
+| Phase 1 item | Status |
+|---|---|
+| §1 Tauri scaffolding + SQLite + migrations wired | ✅ Shipped 2026-04-28 |
+| §2 Encrypted state at rest | Not started |
+| §3 Onboarding wizard | Not started |
+| §4 Channel surface | Not started |
+| §5 Inference abstraction layer | Not started |
+| §6 State surfaces (Station, Dossier, Briefs, Kit, Calibration) | Not started |
+| §7 Migration discipline | Precedent set in §1; applied in subsequent slices |
 
 ## Reading order for a fresh session
 
@@ -34,16 +42,16 @@ If you are landing in this repository — a new Claude Code session, a different
 
 `EXILE.md` is the centerpiece. The application is, in the operator's words, *"a representation of the agent."* Read her first.
 
-## Stack (decided as of Phase 0)
+## Stack
 
-- **Tauri** for the desktop application shell
-- **Rust** backend (encryption, SQLite, inference abstraction client)
-- **Local SQLite** under `~/.coo/`
-- **Encrypted at rest** — per-domain encryption with operator-derived master key
-- **Anthropic Claude API** for inference at MVP, behind an abstraction layer enabling provider swap
+- **Tauri 2** for the desktop application shell
+- **Rust** backend (encryption, SQLite, inference abstraction client) — currently `rustc 1.95.0` MSVC
+- **Frontend:** React + TypeScript + Vite (chosen at Phase 1 §1 entry, 2026-04-28; not gated by doctrine)
+- **Local SQLite** under `~/.coo/coo.db` via `rusqlite` 0.32 (bundled, statically linked)
+- **Migrations** via `rusqlite_migration` 1.x — append-only discipline per `doctrine/RAPPORT-STATE-MODEL.md` §7
+- **Encrypted at rest** — per-domain encryption with operator-derived master key (Phase 1 §2; not yet implemented)
+- **Anthropic Claude API** for inference at MVP, behind an abstraction layer enabling provider swap (Phase 1 §5; not yet implemented)
 - **No Docker.** Native desktop application.
-
-Frontend framework choice deferred to Phase 1 entry. Not gated by doctrine.
 
 ## What this product is *not*
 

@@ -61,9 +61,8 @@ These are load-bearing for COO and apply only inside this repository.
 
 ## Open Decisions That Block Work Here
 
-- **Frontend framework selection.** Does not block doctrine work; blocks Phase 1 implementation kickoff. Decision deferred to Phase 1 entry; not gated by doctrine.
-- **Specific Anthropic Claude model version for MVP.** Sonnet 4.6 / Opus 4.7 / etc. — capability vs. cost vs. latency trade-off. Decision deferred to Phase 1 entry; will be pinned in `mvp/coo.md` Dependencies and in the configuration of the `InferenceProvider` abstraction.
-- **`InferenceProvider` interface shape.** High-level architecture is decided in ADR-0011 and `mvp/coo.md` §5; specific Rust trait shape is implementation work and lands at the start of Phase 1.
+- **Specific Anthropic Claude model version for MVP.** Sonnet 4.6 / Opus 4.7 / etc. — capability vs. cost vs. latency trade-off. Pinned at Phase 1 §5 entry; will be recorded in `mvp/coo.md` Dependencies and in the configuration of the `InferenceProvider` abstraction.
+- **`InferenceProvider` interface shape.** High-level architecture is decided in ADR-0011 and `mvp/coo.md` §5; specific Rust trait shape is implementation work and lands at Phase 1 §5.
 
 If the operator requests work that depends on any of these and the request is doctrine-level rather than implementation-level, surface the dependency immediately rather than silently picking an answer.
 
@@ -74,9 +73,15 @@ If the operator requests work that depends on any of these and the request is do
 - **Encryption granularity** — Per-domain with operator-derived master key. Per `RAPPORT-STATE-MODEL.md` §6.1.
 - **Conversation history retention strategy** — Hybrid retention with Exile summarizing in character. Per `RAPPORT-STATE-MODEL.md` §4.
 
+### Resolved during Phase 1 §1 (2026-04-28)
+
+- **Frontend framework** — React + TypeScript + Vite. Workspace pattern (per `../doctrine/ARCHITECTURE.md` §1) and lowest-friction choice for the operator's existing experience. Not gated by doctrine.
+- **SQLite Rust crate** — `rusqlite` 0.32 with `bundled` feature (statically linked SQLite, no system dependency). Direct synchronous binding suits a local desktop app and is named directly in `RAPPORT-STATE-MODEL.md` §6.6.
+- **Migration runner** — `rusqlite_migration` 1.x. Lightweight, integrates directly with `rusqlite`, tracks `user_version` PRAGMA. First migration creates `_meta` table and sets the append-only precedent per `RAPPORT-STATE-MODEL.md` §7.
+
 ## Current Phase
 
-**Phase 0 — Doctrine and design.** Implementation has not begun.
+**Phase 1 — MVP build, in progress.** Phase 1 was unblocked at 2026-04-28 with Phase 0's final item (Exile character art) still operator-pending and asynchronous; engineering work proceeds in parallel.
 
 | Phase 0 item | Status |
 |---|---|
@@ -86,6 +91,23 @@ If the operator requests work that depends on any of these and the request is do
 | mvp/coo.md | Committed (doctrine c170f73) |
 | Tauri vs. Electron | Decided — Tauri |
 | AI runtime | Decided — Anthropic Claude API + abstraction |
-| Exile character art generation | Pending — own session |
+| Exile character art generation | Pending — operator-driven |
 
-When the character art pass closes, Phase 0 is complete and Phase 1 begins.
+| Phase 1 item | Status |
+|---|---|
+| §1 Tauri scaffolding + SQLite + migrations wired | ✅ Shipped 2026-04-28 |
+| §2 Encrypted state at rest | Not started |
+| §3 Onboarding wizard | Not started |
+| §4 Channel surface | Not started |
+| §5 Inference abstraction layer | Not started |
+| §6 State surfaces (Station, Dossier, Briefs, Kit, Calibration) | Not started |
+| §7 Migration discipline | Precedent set in §1; applied in subsequent slices |
+
+## Current Implementation Status
+
+Read `README.md` for the authoritative current state. As of 2026-04-28 (Phase 1 §1 ship):
+
+- ✅ **Tauri 2 + React/TS/Vite scaffold** at `coo/` root. Bundle identifier `com.digitaloverwatch.coo`; binary `coo.exe`; window title "COO". `cargo check` clean against Rust 1.95.0 MSVC; `npm install` clean (73 pkgs, 0 vulns).
+- ✅ **Local SQLite at `~/.coo/coo.db`** via `rusqlite` 0.32 (bundled, statically linked). Opened and migrated at app startup via Tauri `setup` hook (fail-fast on init error).
+- ✅ **Migration runner** via `rusqlite_migration` 1.x. First migration creates `_meta` table and inserts an `initialized_at` row. Migration validator unit test (`db::tests::migrations_pass_validation`) ships with §1 and exercises every migration's SQL against in-memory SQLite. Append-only discipline per `RAPPORT-STATE-MODEL.md` §7.
+- 🔜 **§2 next** — encryption at rest. Argon2id KDF + per-domain HKDF + age envelope encryption. Builds the crypto substrate that §3-§6 consume.
