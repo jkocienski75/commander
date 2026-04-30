@@ -1,51 +1,65 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+// Top-level routing for §3 (c2). Calls vault_inspect on mount; routes
+// based on the (status, onboarding_completed) tuple:
+//
+//   uninitialized               → OnboardingWizard
+//   initialized + onComplete    → UnlockScreen → ChannelPlaceholder
+//   initialized + !onComplete   → UnlockScreen → ChannelPlaceholder
+//                                 (mid-onboarding crash recovery is a
+//                                  §3 (d) startup-gating concern; for
+//                                  c2 we treat it as the standard
+//                                  unlock path)
+//   inconsistent                → InconsistentError
+//
+// Real startup gating (re-inspect after unlock to verify state, route
+// to wizard-resume if onboarding incomplete, etc.) lives in §3 (d).
+
+import { useEffect, useState } from "react";
+import { InspectResult, vaultInspect } from "./lib/api";
+import { ChannelPlaceholder } from "./components/ChannelPlaceholder";
+import { InconsistentError } from "./components/InconsistentError";
+import { OnboardingWizard } from "./components/OnboardingWizard";
+import { UnlockScreen } from "./components/UnlockScreen";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+export default function App() {
+  const [state, setState] = useState<InspectResult | null>(null);
+  const [unlocked, setUnlocked] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  useEffect(() => {
+    vaultInspect()
+      .then(setState)
+      .catch((err) => setLoadError(typeof err === "string" ? err : String(err)));
+  }, []);
+
+  if (loadError) {
+    return (
+      <main className="screen">
+        <h1>startup error</h1>
+        <p className="error">{loadError}</p>
+      </main>
+    );
   }
 
-  return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+  if (state === null) {
+    return (
+      <main className="screen">
+        <p>loading…</p>
+      </main>
+    );
+  }
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+  if (state.status === "inconsistent") {
+    return <InconsistentError reason={state.reason} />;
+  }
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
-  );
+  if (state.status === "uninitialized") {
+    return <OnboardingWizard onComplete={() => setUnlocked(true)} />;
+  }
+
+  // state.status === "initialized"
+  if (unlocked) {
+    return <ChannelPlaceholder />;
+  }
+  return <UnlockScreen onUnlocked={() => setUnlocked(true)} />;
 }
-
-export default App;
