@@ -21,6 +21,7 @@
 
 use crate::crypto::Domain;
 use crate::db;
+use crate::inference::InferenceProvider;
 use crate::vault::{self, UnlockedVault};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -32,6 +33,13 @@ pub struct AppState {
     pub coo_dir: PathBuf,
     pub db: Mutex<Connection>,
     pub vault: Mutex<Option<UnlockedVault>>,
+    // §5 (a) — inference provider as a trait object so §5 (b) can swap
+    // in the Claude impl by changing only `inference::build_provider`.
+    // No Mutex: the trait is Send + Sync and `&dyn InferenceProvider`
+    // is shared across Tauri command threads; concurrent `infer` calls
+    // don't conflict at the abstraction layer.
+    #[allow(dead_code)] // §4 consumer
+    pub inference: Box<dyn InferenceProvider>,
 }
 
 // JSON-serializable mirror of vault::InitState plus the

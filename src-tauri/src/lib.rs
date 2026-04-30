@@ -1,6 +1,7 @@
 mod commands;
 mod crypto;
 mod db;
+mod inference;
 mod vault;
 
 use std::sync::Mutex;
@@ -21,6 +22,7 @@ pub fn run() {
                 coo_dir,
                 db: Mutex::new(conn),
                 vault: Mutex::new(None),
+                inference: inference::build_provider(),
             });
             Ok(())
         })

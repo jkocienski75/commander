@@ -31,7 +31,9 @@ getrandom = { version = "0.2", features = ["std"] }
 hkdf = "0.12"
 sha2 = "0.10"
 chacha20poly1305 = "0.10"
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }
 
