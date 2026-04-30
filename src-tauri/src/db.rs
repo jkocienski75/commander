@@ -1,4 +1,5 @@
-use rusqlite::Connection;
+use crate::crypto::{encrypt, CryptoError, DomainKey};
+use rusqlite::{params, Connection};
 use rusqlite_migration::{M, Migrations};
 use std::path::PathBuf;
 
@@ -12,7 +13,15 @@ pub enum DbError {
     Sqlite(#[from] rusqlite::Error),
     #[error("migration error: {0}")]
     Migration(#[from] rusqlite_migration::Error),
+    #[error("crypto error: {0}")]
+    Crypto(#[from] CryptoError),
 }
+
+// Schema version for §3 (b) tables. Every encrypted-row write commits to
+// this value explicitly per RAPPORT-STATE-MODEL.md §7.2. A future
+// non-additive migration introduces a new constant; the old constant
+// stays alive for the lazy-migration read path.
+const SCHEMA_VERSION_V1: i64 = 1;
 
 // Per coo/CLAUDE.md "State stays in ~/.coo/" and RAPPORT-STATE-MODEL.md §6.
 pub fn db_path() -> Result<PathBuf, DbError> {
@@ -100,10 +109,67 @@ fn migrations() -> Migrations<'static> {
     ])
 }
 
+// Pure-Rust write helpers consumed by the Tauri commands in `commands`.
+// Kept separate from the #[tauri::command] wrappers so they can be unit-
+// tested without a Tauri runtime. INSERT-or-REPLACE semantics on the
+// encrypted tables: the wizard may re-submit a step (the operator
+// changes their callsign before completing onboarding); the typed §6
+// surfaces will overwrite the same singleton/keyed rows on every change.
+//
+// All three helpers update updated_at via SQLite's CURRENT_TIMESTAMP
+// default by leaving the column out of the UPSERT payload — INSERT
+// applies the default; ON CONFLICT DO UPDATE explicitly rewrites it.
+
+pub fn put_app_config(conn: &Connection, key: &str, value: &str) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO app_config (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET
+             value = excluded.value,
+             updated_at = CURRENT_TIMESTAMP",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+pub fn put_operator_profile(
+    conn: &Connection,
+    key: &DomainKey,
+    plaintext: &[u8],
+) -> Result<(), DbError> {
+    let bundle = encrypt(key, plaintext)?;
+    conn.execute(
+        "INSERT INTO operator_profile (id, ciphertext, schema_version) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET
+             ciphertext = excluded.ciphertext,
+             schema_version = excluded.schema_version,
+             updated_at = CURRENT_TIMESTAMP",
+        params![bundle, SCHEMA_VERSION_V1],
+    )?;
+    Ok(())
+}
+
+pub fn put_calibration_setting(
+    conn: &Connection,
+    key: &DomainKey,
+    dial_key: &str,
+    plaintext: &[u8],
+) -> Result<(), DbError> {
+    let bundle = encrypt(key, plaintext)?;
+    conn.execute(
+        "INSERT INTO calibration_setting (dial_key, ciphertext, schema_version) VALUES (?1, ?2, ?3)
+         ON CONFLICT(dial_key) DO UPDATE SET
+             ciphertext = excluded.ciphertext,
+             schema_version = excluded.schema_version,
+             updated_at = CURRENT_TIMESTAMP",
+        params![dial_key, bundle, SCHEMA_VERSION_V1],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{decrypt, encrypt, Domain};
+    use crate::crypto::{decrypt, Domain};
     use crate::vault::setup_passphrase;
     use rusqlite::params;
     use tempfile::TempDir;
@@ -185,6 +251,74 @@ mod tests {
 
         let decrypted = decrypt(&key, &stored).unwrap();
         assert_eq!(decrypted.as_slice(), plaintext);
+    }
+
+    #[test]
+    fn put_app_config_upserts() {
+        let conn = open_in_memory();
+        put_app_config(&conn, "theme", "secret_agent").unwrap();
+        put_app_config(&conn, "theme", "secret_agent_v2").unwrap();
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM app_config WHERE key = 'theme'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "secret_agent_v2");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM app_config", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "upsert must not create a duplicate row");
+    }
+
+    #[test]
+    fn put_operator_profile_upserts_singleton() {
+        // Second call to put_operator_profile must overwrite the singleton
+        // row, not fail on the CHECK (id = 1) constraint.
+        let dir = TempDir::new().unwrap();
+        let vault = setup_passphrase(dir.path(), b"operator-passphrase").unwrap();
+        let key = vault.domain_key(Domain::OperatorKnowledge);
+        let conn = open_in_memory();
+
+        put_operator_profile(&conn, &key, b"{\"callsign\":\"Cardinal-7\"}").unwrap();
+        put_operator_profile(&conn, &key, b"{\"callsign\":\"Cardinal\"}").unwrap();
+
+        let stored: Vec<u8> = conn
+            .query_row(
+                "SELECT ciphertext FROM operator_profile WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let decrypted = decrypt(&key, &stored).unwrap();
+        assert_eq!(decrypted.as_slice(), b"{\"callsign\":\"Cardinal\"}");
+    }
+
+    #[test]
+    fn put_calibration_setting_upserts_per_key() {
+        let dir = TempDir::new().unwrap();
+        let vault = setup_passphrase(dir.path(), b"operator-passphrase").unwrap();
+        let key = vault.domain_key(Domain::OperatorKnowledge);
+        let conn = open_in_memory();
+
+        put_calibration_setting(&conn, &key, "warmth", b"present").unwrap();
+        put_calibration_setting(&conn, &key, "warmth", b"open").unwrap();
+        put_calibration_setting(&conn, &key, "discipline", b"exacting").unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM calibration_setting", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "two distinct keys, no duplicates from upsert");
+
+        let warmth: Vec<u8> = conn
+            .query_row(
+                "SELECT ciphertext FROM calibration_setting WHERE dial_key = 'warmth'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(decrypt(&key, &warmth).unwrap().as_slice(), b"open");
     }
 
     #[test]
