@@ -34,19 +34,25 @@ import {
 } from "../lib/api";
 import { FAMILIAR_PRESET } from "../lib/calibration";
 
+type Step = "welcome" | "passphrase" | "profile" | "review";
+
 interface Props {
   onComplete: () => void;
+  // Resume entry point. When the operator crashed mid-wizard, the vault
+  // is already initialized and unlocked but onboarding_completed_at is
+  // not written; §3 (d) routes through UnlockScreen and then mounts the
+  // wizard at "profile" so the welcome + passphrase steps are skipped.
+  // Default is "welcome" for the first-run path.
+  startStep?: Step;
 }
-
-type Step = "welcome" | "passphrase" | "profile" | "review";
 
 interface ProfileDraft {
   callsign: string;
   display_name: string;
 }
 
-export function OnboardingWizard({ onComplete }: Props) {
-  const [step, setStep] = useState<Step>("welcome");
+export function OnboardingWizard({ onComplete, startStep = "welcome" }: Props) {
+  const [step, setStep] = useState<Step>(startStep);
   const [passphrase, setPassphrase] = useState("");
   const [confirm, setConfirm] = useState("");
   const [profile, setProfile] = useState<ProfileDraft>({
