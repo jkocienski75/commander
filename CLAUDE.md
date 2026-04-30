@@ -61,11 +61,9 @@ These are load-bearing for COO and apply only inside this repository.
 
 ## Open Decisions That Block Work Here
 
-- **Specific Anthropic Claude model version for MVP.** Sonnet 4.6 / Opus 4.7 / etc. — capability vs. cost vs. latency trade-off. Pinned at Phase 1 §5 entry; will be recorded in `mvp/coo.md` Dependencies and in the configuration of the `InferenceProvider` abstraction.
-- **`InferenceProvider` interface shape.** High-level architecture is decided in ADR-0011 and `mvp/coo.md` §5; specific Rust trait shape is implementation work and lands at Phase 1 §5.
-- **Calibration dial enumeration for the §3 (b) schema.** `RAPPORT-STATE-MODEL.md` §3.5 references "calibration dial settings (operator-controlled)" and the doctrinal ceiling at calibration 4b but defers the *enumeration* of the dials to `EXILE.md` §3. §3 (b)'s schema migration needs the dial set confirmed before it can define a typed `calibration_state` table. Decide at §3 (b) entry: lift the enumeration from `EXILE.md` §3 into the schema, or ship §3 (b) with a placeholder key/value calibration table (string keys, encrypted text values, `schema_version`) and defer the typed schema to §6 (Calibration surface).
+*(None at present — the three Phase 1 entry-blocking decisions named earlier (Anthropic model version, `InferenceProvider` trait shape, calibration dial enumeration) all resolved across §3 (b) and §5 (a). New entries land here when future slices surface doctrine-level questions; pure implementation choices belong in the slice's "Resolved during" subsection rather than this list.)*
 
-If the operator requests work that depends on any of these and the request is doctrine-level rather than implementation-level, surface the dependency immediately rather than silently picking an answer.
+If the operator requests work that depends on a doctrine-level question rather than an implementation choice, surface the dependency immediately rather than silently picking an answer.
 
 ### Resolved during Phase 0
 
