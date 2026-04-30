@@ -32,8 +32,10 @@ hkdf = "0.12"
 sha2 = "0.10"
 chacha20poly1305 = "0.10"
 async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }
+wiremock = "0.6"
 
