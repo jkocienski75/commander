@@ -909,7 +909,12 @@ mod tests {
         session_id: &str,
         count: usize,
     ) {
+        // Wall-clock-now rather than a fixed string: `infer_impl` runs
+        // `detect_session_boundary` against `current_iso_timestamp`, and
+        // a fixed `created_at` on these turns becomes a 6-hour shelf-life
+        // time bomb (turns drift past `SESSION_INACTIVITY_GAP_HOURS`).
         let key = vault.domain_key(Domain::Conversation);
+        let created_at = db::current_iso_timestamp(conn).unwrap();
         for i in 0..count as i64 {
             db::put_turn(
                 conn,
@@ -922,7 +927,7 @@ mod tests {
                     TurnRole::Assistant
                 },
                 &format!("turn {i}"),
-                "2026-05-01T12:00:00.000Z",
+                &created_at,
             )
             .unwrap();
             db::increment_session_turn_count(conn, session_id).unwrap();
