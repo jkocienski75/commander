@@ -61,7 +61,15 @@ These are load-bearing for COO and apply only inside this repository.
 
 ## Open Decisions That Block Work Here
 
-> *Phase 1 §4 (Channel surface) is closed across (a) + (a3) + (b) + (c). Phase 1 §6 (state surfaces — Station, Dossier, Briefs, Kit, Calibration) is the next major entry point. The §6 design starts with which surface to ship first; Calibration is a strong candidate because it consumes the §3 (b) `calibration_setting` table that has been waiting for typed UI, and Dossier is a strong candidate because it consumes operator-knowledge proposals which §4 (c) does not yet write but should start writing once Dossier exists to confirm them. Sequencing TBD.*
+> *No design questions currently blocking work. Sequencing decided 2026-05-01:*
+>
+> *1. **Documentary debt retirement** — the five entries in "Documentary debt to retire" below. Phase 1 close is the natural moment and most of the substance is doctrine updates against `RAPPORT-STATE-MODEL.md`. Suggested cut into three slices: (a) doctrine sweep covering the §6.6 envelope-crate recommendation, in-memory hygiene, and the lock-key / unlock UX-layer translation — all RAPPORT-STATE-MODEL.md prose with no schema or IPC impact; (b) v2 bundle bump for semantic AAD — meaningful Rust implementation work with KAT churn and a v1→v2 lazy-migration path applied to all five encrypted-column tables (`operator_profile`, `calibration_setting`, `conversation_turn`, `conversation_summary`, plus future §6 tables); (c) doctrine bundle move from `coo/doctrine/` to `src-tauri/resources/doctrine/` — cross-repo coordination with the workspace doctrine repo at `../doctrine/`. The cuts are recommendations; a future design session can re-shape them.*
+>
+> *2. **Phase 0 character art** — operator-driven, asynchronous. Image generation against `EXILE.md` §1 / §1.5 / §1.5.b–e behavioral cues + the §3.5 calibration ladder framing. Closes the last Phase 0 deliverable that has been pending since 2026-04-28. Not a coding session.*
+>
+> *3. **Phase 1 §6 — Calibration first.** Consumes the §3 (b) `calibration_setting` table that has been waiting for typed UI since the schema landed; commits to the enum-vs-float-vs-step quantization deferred from §3 (b); wires the §3.5 doctrinal ceiling at calibration 4b into actual UI affordances. Dossier and the remaining §6 surfaces (Station, Briefs, Kit) sequence after Calibration based on operator review.*
+>
+> *Documentary debt is the next entry point. The next session designs slice plans for items 1(a)–(c) + executes them, or the operator runs a separate Desktop design session first to lock the slice plans (the §4 pattern).*
 
 If the operator requests work that depends on a doctrine-level question rather than an implementation choice, surface the dependency immediately rather than silently picking an answer.
 
