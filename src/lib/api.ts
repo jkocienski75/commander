@@ -30,3 +30,23 @@ export const writeCalibrationSetting = (
   plaintext: string,
 ): Promise<void> =>
   invoke<void>("write_calibration_setting", { dialKey, plaintext });
+
+// §4 (a2) Channel surface types. `Message` mirrors `inference::Message`
+// (Rust): role is the serde-snake_case-renamed Role enum, content is
+// the turn text. `InferenceCommandError` mirrors the JSON-tagged enum
+// in commands.rs; the wire shape is locked by
+// commands::tests::inference_command_error_wire_shape_is_pinned on
+// the Rust side.
+export type Message = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type InferenceCommandError =
+  | { kind: "auth"; message: string }
+  | { kind: "network"; message: string }
+  | { kind: "rate_limited" }
+  | { kind: "provider"; message: string };
+
+export const infer = (messages: Message[]): Promise<string> =>
+  invoke<string>("infer", { messages });

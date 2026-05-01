@@ -114,6 +114,102 @@ button:disabled {
   gap: 0.3em;
 }
 
+/* §4 (a2) Channel surface. Full-viewport column: scrollback fills the
+   available space, input is pinned at the bottom. Wider than .screen
+   (480px) because conversation reads better with a longer line
+   length. */
+.channel {
+  height: 100vh;
+  max-width: 720px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.channel-scrollback {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6em;
+}
+
+.channel-empty {
+  align-self: center;
+  margin: auto;
+  font-style: italic;
+  opacity: 0.6;
+}
+
+.turn {
+  max-width: 80%;
+  padding: 0.55em 0.9em;
+  border-radius: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.turn-user {
+  align-self: flex-end;
+  background-color: #396cd8;
+  color: #ffffff;
+}
+
+.turn-assistant {
+  align-self: flex-start;
+  background-color: #e8e8e8;
+  color: #0f0f0f;
+}
+
+.turn-inflight {
+  align-self: flex-start;
+  font-style: italic;
+  opacity: 0.6;
+}
+
+.channel-error {
+  align-self: stretch;
+  padding: 0.6em 0.9em;
+  border: 1px solid #f2b8b5;
+  border-radius: 6px;
+  background-color: rgba(179, 38, 30, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5em;
+}
+
+.channel-error button {
+  align-self: flex-start;
+  padding: 0.4em 0.9em;
+  font-size: 0.9em;
+}
+
+.channel-input {
+  display: flex;
+  gap: 0.5em;
+  padding: 0.75em 1em;
+  border-top: 1px solid #d0d0d0;
+}
+
+.channel-input textarea {
+  flex: 1;
+  resize: none;
+  font-family: inherit;
+  font-size: 1em;
+  border-radius: 6px;
+  border: 1px solid #cfcfcf;
+  padding: 0.55em 0.9em;
+  color: inherit;
+  background-color: #ffffff;
+  transition: border-color 0.15s;
+}
+
+.channel-input textarea:focus {
+  outline: none;
+  border-color: #396cd8;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f0f0f0;
@@ -137,5 +233,20 @@ button:disabled {
 
   .error {
     color: #f2b8b5;
+  }
+
+  .turn-assistant {
+    background-color: #2a2a2a;
+    color: #f0f0f0;
+  }
+
+  .channel-input {
+    border-top-color: #404040;
+  }
+
+  .channel-input textarea {
+    color: #ffffff;
+    background-color: #2a2a2a;
+    border-color: #404040;
   }
 }

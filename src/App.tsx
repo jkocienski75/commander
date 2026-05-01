@@ -4,7 +4,7 @@
 //   uninitialized                              → wizard (welcome)
 //   initialized + !unlocked                    → unlock screen
 //   initialized + unlocked + !completed        → wizard (resume at profile)
-//   initialized + unlocked + completed         → channel placeholder
+//   initialized + unlocked + completed         → Channel surface (Exile)
 //   inconsistent                               → error
 //
 // The "unlocked + !completed" case is §3 (d)'s mid-onboarding crash
@@ -16,7 +16,7 @@
 
 import { useEffect, useState } from "react";
 import { InspectResult, vaultInspect } from "./lib/api";
-import { ChannelPlaceholder } from "./components/ChannelPlaceholder";
+import { ChannelSurface } from "./components/ChannelSurface";
 import { InconsistentError } from "./components/InconsistentError";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { UnlockScreen } from "./components/UnlockScreen";
@@ -88,5 +88,5 @@ export default function App() {
     );
   }
 
-  return <ChannelPlaceholder />;
+  return <ChannelSurface />;
 }
