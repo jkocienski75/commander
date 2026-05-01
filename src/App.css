@@ -150,6 +150,17 @@ button:disabled {
   word-break: break-word;
 }
 
+/* §4 (b) — date dividers between turns whose calendar day differs.
+   Centered, muted, breathing room above and below so the surrounding
+   bubbles read cleanly. */
+.date-divider {
+  align-self: center;
+  font-size: 0.85em;
+  opacity: 0.55;
+  margin: 0.5em 0 0.2em;
+  letter-spacing: 0.04em;
+}
+
 .turn-user {
   align-self: flex-end;
   background-color: #396cd8;

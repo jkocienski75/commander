@@ -35,6 +35,8 @@ pub fn run() {
             commands::write_operator_profile,
             commands::write_calibration_setting,
             commands::infer,
+            commands::load_conversation,
+            commands::append_turn,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
