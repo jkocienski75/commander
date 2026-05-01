@@ -21,7 +21,8 @@
 
 use crate::crypto::Domain;
 use crate::db;
-use crate::inference::InferenceProvider;
+use crate::inference::{self, InferenceProvider};
+use crate::prompt;
 use crate::vault::{self, UnlockedVault};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -38,7 +39,6 @@ pub struct AppState {
     // No Mutex: the trait is Send + Sync and `&dyn InferenceProvider`
     // is shared across Tauri command threads; concurrent `infer` calls
     // don't conflict at the abstraction layer.
-    #[allow(dead_code)] // §4 consumer
     pub inference: Box<dyn InferenceProvider>,
 }
 
@@ -148,4 +148,114 @@ pub fn write_calibration_setting(
     let conn = state.db.lock().map_err(|e| format!("db lock poisoned: {e}"))?;
     db::put_calibration_setting(&conn, &domain_key, &dial_key, plaintext.as_bytes())
         .map_err(|e| e.to_string())
+}
+
+// JSON-serializable mirror of `inference::InferenceError`. Plain
+// `String` would collapse the four variants into one opaque message
+// at the IPC boundary; the channel surface needs to render distinct
+// UI for "check your API key" (Auth) vs. "wait a moment"
+// (RateLimited) vs. "connection failed" (Network) vs. provider
+// message (Provider). Tagged enum lets JS pattern-match on `kind`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InferenceCommandError {
+    Auth { message: String },
+    Network { message: String },
+    RateLimited,
+    Provider { message: String },
+}
+
+impl From<inference::InferenceError> for InferenceCommandError {
+    fn from(err: inference::InferenceError) -> Self {
+        match err {
+            inference::InferenceError::Auth(message) => Self::Auth { message },
+            inference::InferenceError::Network(message) => Self::Network { message },
+            inference::InferenceError::RateLimited => Self::RateLimited,
+            inference::InferenceError::Provider(message) => Self::Provider { message },
+        }
+    }
+}
+
+// The §4 (a) Channel surface command. Takes the conversation
+// turn-list as it stands on the JS side, assembles the system prompt
+// from `EXILE.md` §1 + §1.5 + §2 verbatim (per `RAPPORT-STATE-MODEL.md`
+// §5.2 step 1 — the load-bearing core only at §4 (a); state-derived
+// modifiers and calibration ceiling clamp land in subsequent slices),
+// and routes the request through whichever provider
+// `inference::build_provider` selected at startup (Claude when
+// `ANTHROPIC_API_KEY` is set, stub otherwise).
+//
+// System prompt assembly is deliberately server-side: JS never sees
+// the doctrine text and never has the option to bypass it. The
+// `messages` argument carries only the operator/assistant turn
+// history.
+//
+// No state lock taken — `&dyn InferenceProvider` is shared safely
+// across Tauri command threads, concurrent `infer` calls don't
+// conflict at the abstraction layer (per the §5 (a) AppState shape
+// decision in CLAUDE.md "Resolved during Phase 1 §5").
+#[tauri::command]
+pub async fn infer(
+    messages: Vec<inference::Message>,
+    state: State<'_, AppState>,
+) -> Result<String, InferenceCommandError> {
+    let request = inference::InferenceRequest {
+        system_prompt: prompt::assemble_system_prompt().to_string(),
+        messages,
+    };
+    let response = state.inference.infer(request).await?;
+    Ok(response.content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The `From<InferenceError>` impl is what translates the inference
+    // layer's error model to the IPC layer. Locked here so a future
+    // change to either enum's variant set fails loudly rather than
+    // silently mapping wrong (e.g. forgetting a new variant after
+    // `InferenceError` adds a fifth case).
+    #[test]
+    fn from_inference_error_preserves_each_variant() {
+        let auth = InferenceCommandError::from(inference::InferenceError::Auth("k".into()));
+        assert!(matches!(auth, InferenceCommandError::Auth { ref message } if message == "k"));
+
+        let net =
+            InferenceCommandError::from(inference::InferenceError::Network("down".into()));
+        assert!(matches!(net, InferenceCommandError::Network { ref message } if message == "down"));
+
+        let rl = InferenceCommandError::from(inference::InferenceError::RateLimited);
+        assert!(matches!(rl, InferenceCommandError::RateLimited));
+
+        let prov = InferenceCommandError::from(inference::InferenceError::Provider("oops".into()));
+        assert!(matches!(prov, InferenceCommandError::Provider { ref message } if message == "oops"));
+    }
+
+    // Wire-shape KAT for the four variants. JS pattern-matches on
+    // `kind` and reads `message` for the three message-bearing
+    // variants. Drift in the field name, the tag name, or the
+    // snake_case transform breaks the channel surface's error
+    // rendering — this test makes that drift loud.
+    #[test]
+    fn inference_command_error_wire_shape_is_pinned() {
+        use serde_json::{json, to_value};
+
+        assert_eq!(
+            to_value(InferenceCommandError::Auth { message: "x".into() }).unwrap(),
+            json!({ "kind": "auth", "message": "x" })
+        );
+        assert_eq!(
+            to_value(InferenceCommandError::Network { message: "x".into() }).unwrap(),
+            json!({ "kind": "network", "message": "x" })
+        );
+        assert_eq!(
+            to_value(InferenceCommandError::RateLimited).unwrap(),
+            json!({ "kind": "rate_limited" })
+        );
+        assert_eq!(
+            to_value(InferenceCommandError::Provider { message: "x".into() }).unwrap(),
+            json!({ "kind": "provider", "message": "x" })
+        );
+    }
 }

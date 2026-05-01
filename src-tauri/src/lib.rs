@@ -2,6 +2,7 @@ mod commands;
 mod crypto;
 mod db;
 mod inference;
+mod prompt;
 mod vault;
 
 use std::sync::Mutex;
@@ -33,6 +34,7 @@ pub fn run() {
             commands::write_app_config,
             commands::write_operator_profile,
             commands::write_calibration_setting,
+            commands::infer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

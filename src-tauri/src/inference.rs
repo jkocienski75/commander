@@ -1,11 +1,3 @@
-// §5 (a) ships the trait + stub ahead of its consumers. `Role`,
-// `Message`, `InferenceRequest`, `InferenceResponse`, `InferenceError`,
-// and `infer` are unreachable from prod code paths until §4 (Channel
-// surface) wires the trait into a Tauri command and §5 (b) constructs
-// the Claude impl that errors. Module-level `#![allow(dead_code)]`
-// suppresses warnings for the whole staging area until then.
-#![allow(dead_code)]
-
 // Inference provider abstraction per ADR-0011 and `mvp/coo.md` §5 —
 // the seam that lets COO swap providers (and eventually local
 // inference) without an application rewrite. §5 (a) ships the trait +
