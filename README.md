@@ -11,7 +11,7 @@ COO is an independent product in the workspace per [ADR-0011](../doctrine/decisi
 | Phase 0 item | Status |
 |---|---|
 | `doctrine/EXILE.md` | v0.3 complete |
-| `doctrine/RAPPORT-STATE-MODEL.md` | v0.4 complete |
+| `doctrine/RAPPORT-STATE-MODEL.md` | v0.5 complete |
 | `../doctrine/decisions/0011-coo-as-independent-product.md` | Accepted |
 | `../doctrine/mvp/coo.md` | Committed (doctrine c170f73) |
 | Tauri vs. Electron | Decided — Tauri |
