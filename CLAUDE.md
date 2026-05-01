@@ -61,7 +61,14 @@ These are load-bearing for COO and apply only inside this repository.
 
 ## Open Decisions That Block Work Here
 
-*(None at present — the three Phase 1 entry-blocking decisions named earlier (Anthropic model version, `InferenceProvider` trait shape, calibration dial enumeration) all resolved across §3 (b) and §5 (a). New entries land here when future slices surface doctrine-level questions; pure implementation choices belong in the slice's "Resolved during" subsection rather than this list.)*
+> **First design question for the next session — Channel surface output discipline.** Raised 2026-05-01 by the operator after end-to-end verification of §4 (a) against the real Anthropic API. Exile's chat-bubble output included third-person stage directions ("*A small pause. Her eyes hold yours a second longer than necessary*") alongside dialogue. The doctrine hasn't specified Channel-surface output format: `RAPPORT-STATE-MODEL.md` §5.2 step 1 enumerates state / calibration / wellbeing modifiers but says nothing about how a chat bubble should render Exile, and `EXILE.md` §1 / §1.5 are character description in third-person prose — without an explicit output instruction, the natural register-mirror is third-person output.
+>
+> Two parallel drafts await operator review in **`doctrine/CHANNEL-OUTPUT-DISCIPLINE-DRAFT.md`**:
+>
+> 1. **Doctrine addition** — new §5.5 in `RAPPORT-STATE-MODEL.md` naming "Channel surface output discipline" as load-bearing. Surface-level, not character-level (`EXILE.md` is unchanged). The rule: bubble = dialogue she speaks; visual surface = presence; language carries register.
+> 2. **Runtime appendix** — text appended to the system prompt by `prompt::assemble_system_prompt`, instructing Exile that in the Channel surface output is dialogue only.
+>
+> The drafts file lists five operator-review questions (framing, tone of the runtime appendix, axiomatic-vs-enumerative formulation, the pre-supposition that Phase 0 §4 character art will eventually carry presence, slice sequencing). Resolution unblocks §4 (a3) — the runtime implementation of whichever framing the operator approves. The drafts file describes the §4 (a3) slice plan (doctrine bump + runtime appendix + KAT extension) and retires itself when (a3) ships.
 
 If the operator requests work that depends on a doctrine-level question rather than an implementation choice, surface the dependency immediately rather than silently picking an answer.
 
