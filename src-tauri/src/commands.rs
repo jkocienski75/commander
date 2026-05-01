@@ -20,7 +20,7 @@
 // in CLAUDE.md "Documentary debt to retire".
 
 use crate::crypto::Domain;
-use crate::db::{self, DecryptedTurn, TurnRole};
+use crate::db::{self, DecryptedSummary, DecryptedTurn, SessionBoundary, SummaryKind, TurnRole};
 use crate::inference::{self, InferenceProvider};
 use crate::prompt;
 use crate::vault::{self, UnlockedVault};
@@ -252,10 +252,42 @@ impl From<DecryptedTurn> for TurnPayload {
     }
 }
 
+// §4 (c) — surfaced summary covering a turn range. Rendered by the
+// React `<SummaryStanza>` component in place of the turns it covers.
+// `kind` and `session_id` are exposed so a future operator-tooling
+// surface can distinguish within-session from cross-session
+// summaries without an extra round-trip.
+#[derive(Debug, Serialize)]
+pub struct SummaryPayload {
+    pub session_id: String,
+    pub kind: SummaryKind,
+    pub covers_turn_range_start: i64,
+    pub covers_turn_range_end: i64,
+    pub content: String,
+    pub generated_at: String,
+}
+
+impl From<DecryptedSummary> for SummaryPayload {
+    fn from(s: DecryptedSummary) -> Self {
+        Self {
+            session_id: s.session_id,
+            kind: s.kind,
+            covers_turn_range_start: s.covers_turn_range_start,
+            covers_turn_range_end: s.covers_turn_range_end,
+            content: s.content,
+            generated_at: s.generated_at,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct LoadConversationResponse {
     pub session_id: String,
     pub turns: Vec<TurnPayload>,
+    // §4 (c) — summaries (cross-session from prior sessions plus
+    // within-session for the current session) for the React side to
+    // render in place of covered turns.
+    pub summaries: Vec<SummaryPayload>,
 }
 
 // Returned by the rewired `infer` command. Both turn indices and both
@@ -279,6 +311,14 @@ pub struct InferResponse {
     pub assistant_content: String,
     pub turn_indices: TurnIndices,
     pub created_at: TurnTimestamps,
+    // §4 (c) — the (possibly new) session_id the operator turn was
+    // written into. When the inactivity-gap boundary fires inside
+    // `infer`, the previous session is finalized and a new session
+    // is created; this field carries the new id back so the React
+    // side stays in sync without an extra `load_conversation`
+    // round-trip. When no boundary fires, this is the same id the
+    // caller passed in.
+    pub session_id: String,
 }
 
 // Translate the db layer's `TurnRole` into the inference layer's
@@ -326,9 +366,22 @@ pub fn load_conversation(
         message: format!("db lock poisoned: {e}"),
     })?;
     let session_id = ensure_session(&conn)?;
-    let decrypted = db::list_turns_for_ui(&conn, &domain_key, &session_id)?;
-    let turns = decrypted.into_iter().map(TurnPayload::from).collect();
-    Ok(LoadConversationResponse { session_id, turns })
+    let decrypted_turns = db::list_turns_for_ui(&conn, &domain_key, &session_id)?;
+    let turns = decrypted_turns
+        .into_iter()
+        .map(TurnPayload::from)
+        .collect();
+    let decrypted_summaries =
+        db::list_summaries_for_inference(&conn, &domain_key, &session_id)?;
+    let summaries = decrypted_summaries
+        .into_iter()
+        .map(SummaryPayload::from)
+        .collect();
+    Ok(LoadConversationResponse {
+        session_id,
+        turns,
+        summaries,
+    })
 }
 
 // Surfaced for completeness — not consumed by the §4 (b) React flow,
@@ -384,129 +437,311 @@ pub fn append_turn(
     })
 }
 
-// The §4 (b) Channel surface command. Disk is the source of truth: the
-// command appends the operator turn, reads the in-window history (now
-// including the turn just written), assembles the system prompt from
-// `EXILE.md` §1 + §1.5 + §2 verbatim plus the §4 (a3) output discipline
-// directive (per `RAPPORT-STATE-MODEL.md` §5.2 step 1 + §5.5; state-
-// derived modifiers and calibration ceiling clamp land in subsequent
-// slices), routes the request through whichever provider
-// `inference::build_provider` selected at startup, and writes the
-// assistant response back to disk.
-//
-// Lock ordering preserved across the longer flow: vault before db,
-// never simultaneously held. The inference call runs with no locks
-// held — that's a network round-trip, not something the locks should
-// span. The vault is re-acquired on the assistant-write side because
-// a future "lock now" affordance could in principle close the vault
-// between the operator-write and the assistant-write; the re-derive
-// is cheap (HKDF-SHA256 against the master key already in memory).
-//
-// Lossy mapping: db / crypto failures collapse into
-// `InferenceCommandError::Provider("conversation persistence: ...")`
-// per the From<DbError> impl above, keeping the §4 (a1) wire shape
-// stable.
+// Pending summarization batch captured during the locked phase of
+// `infer_impl` and processed (network call) outside the locks.
+struct PendingSummary {
+    session_id: String,
+    kind: SummaryKind,
+    range: (i64, i64),
+    turns: Vec<DecryptedTurn>,
+    // For cross-session summaries, the timestamp recorded as
+    // `generated_at` is the prior session's `ended_at` — the moment
+    // the boundary fired. For within-session, generated_at is set at
+    // write time inside the second locked phase.
+    generated_at_override: Option<String>,
+}
+
+// Helper: derive the conversation domain key from the vault. Called
+// at every lock-reacquisition point in the infer flow because a
+// future "lock now" affordance could in principle close the vault
+// between phases; the re-derive is cheap HKDF-SHA256 over a 32-byte
+// key already in memory.
+fn derive_conversation_key(
+    vault_mutex: &Mutex<Option<UnlockedVault>>,
+) -> Result<crate::crypto::DomainKey, InferenceCommandError> {
+    let guard = vault_mutex
+        .lock()
+        .map_err(|e| InferenceCommandError::Provider {
+            message: format!("vault lock poisoned: {e}"),
+        })?;
+    let vault_ref = guard
+        .as_ref()
+        .ok_or_else(|| InferenceCommandError::Provider {
+            message: "vault is locked".to_string(),
+        })?;
+    Ok(vault_ref.domain_key(Domain::Conversation))
+}
+
+fn lock_db(
+    db_mutex: &Mutex<Connection>,
+) -> Result<std::sync::MutexGuard<'_, Connection>, InferenceCommandError> {
+    db_mutex.lock().map_err(|e| InferenceCommandError::Provider {
+        message: format!("db lock poisoned: {e}"),
+    })
+}
+
+// Run one summarization inference call. The summarization prompt
+// holds the character text + output discipline + summarization
+// directive + the turns to summarize; the messages list carries a
+// single trigger user message (Claude's API requires at least one).
+async fn run_summarization_call(
+    provider: &dyn InferenceProvider,
+    turns: &[DecryptedTurn],
+) -> Result<String, InferenceCommandError> {
+    let request = inference::InferenceRequest {
+        system_prompt: prompt::assemble_summarization_prompt(turns),
+        messages: vec![inference::Message {
+            role: inference::Role::User,
+            content: "Write your recollection now, per the summarization task above.".into(),
+        }],
+    };
+    let response = provider.infer(request).await?;
+    Ok(response.content)
+}
+
+// Format the prepended summaries as a single synthetic assistant
+// message body. Each summary becomes an "Earlier: ..." stanza
+// separated by blank lines, in chronological (generated_at) order.
+// Empty input returns an empty string — caller checks for that
+// before adding the synthetic message.
+fn format_summaries_as_synthetic_assistant(summaries: &[DecryptedSummary]) -> String {
+    let mut out = String::new();
+    for (i, s) in summaries.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        out.push_str("Earlier: ");
+        out.push_str(&s.content);
+    }
+    out
+}
+
+// The Tauri command — thin wrapper around `infer_impl` that pulls
+// the underlying primitives off `AppState`. The split exists so
+// integration tests (`infer_command_*`) can call `infer_impl`
+// directly without a Tauri runtime.
 #[tauri::command]
 pub async fn infer(
     session_id: String,
     operator_turn: String,
     state: State<'_, AppState>,
 ) -> Result<InferResponse, InferenceCommandError> {
-    // Step 1 — derive the conversation domain key.
-    let domain_key = {
-        let guard = state
-            .vault
-            .lock()
-            .map_err(|e| InferenceCommandError::Provider {
-                message: format!("vault lock poisoned: {e}"),
-            })?;
-        let vault_ref = guard
-            .as_ref()
-            .ok_or_else(|| InferenceCommandError::Provider {
-                message: "vault is locked".to_string(),
-            })?;
-        vault_ref.domain_key(Domain::Conversation)
-    };
+    infer_impl(
+        &state.db,
+        &state.vault,
+        state.inference.as_ref(),
+        session_id,
+        operator_turn,
+    )
+    .await
+}
 
-    // Step 2 — append the operator turn and read the in-window
-    // history under a single db lock + transaction. The transaction
-    // wraps both writes (turn INSERT + session turn_count UPDATE) so
-    // a half-write can't drift the count from the actual rows; the
-    // history read happens before commit so it sees the just-written
-    // turn at the same isolation snapshot.
-    let (user_turn_index, user_created_at, in_window) = {
-        let mut conn_guard =
-            state.db.lock().map_err(|e| InferenceCommandError::Provider {
-                message: format!("db lock poisoned: {e}"),
-            })?;
-        let tx = conn_guard.transaction().map_err(db::DbError::from)?;
-        let turn_index = db::next_turn_index(&tx, &session_id)?;
-        let created_at = db::current_iso_timestamp(&tx)?;
+// The §4 (b) + §4 (c) Channel surface flow.
+//
+// Phases (lock acquisition is bounded; network calls run with no
+// locks held):
+//
+//   Phase 1 (locked) — detect cross-session boundary; if it fires,
+//     finalize the old session, capture its unsummarized turns as a
+//     pending cross_session summary, and create a new session. Append
+//     the operator turn into the active session. Check the within-
+//     session threshold; if exceeded, capture the oldest
+//     SUMMARIZATION_BATCH_SIZE turns as a pending within_session
+//     summary.
+//
+//   Phase 2 (no locks) — run pending summarization inference calls.
+//     Cross-session first (the boundary already fired), then within-
+//     session. Both calls use `assemble_summarization_prompt` so
+//     Exile summarizes in her own register per RAPPORT-STATE-MODEL.md
+//     §4.2.
+//
+//   Phase 3 (locked) — write summary rows. Read in-window turns +
+//     summaries (now including any just-written ones). Commit.
+//
+//   Phase 4 (no locks) — operator-facing inference call. Messages
+//     list = [synthetic assistant with summaries, ...in_window turns].
+//
+//   Phase 5 (locked) — write the assistant turn.
+//
+// The cross-session summary's `generated_at` is the prior session's
+// `ended_at` — the moment the boundary fired. The within-session
+// summary's `generated_at` is the current time at write.
+async fn infer_impl(
+    db_mutex: &Mutex<Connection>,
+    vault_mutex: &Mutex<Option<UnlockedVault>>,
+    provider: &dyn InferenceProvider,
+    session_id_in: String,
+    operator_turn: String,
+) -> Result<InferResponse, InferenceCommandError> {
+    let active_session_id: String;
+    let user_turn_index: i64;
+    let user_created_at: String;
+    let mut pending: Vec<PendingSummary> = Vec::new();
+
+    // Phase 1.
+    {
+        let domain_key = derive_conversation_key(vault_mutex)?;
+        let mut conn = lock_db(db_mutex)?;
+        let tx = conn.transaction().map_err(db::DbError::from)?;
+
+        let now = db::current_iso_timestamp(&tx)?;
+        match db::detect_session_boundary(&tx, &session_id_in, &now)? {
+            SessionBoundary::Continue => {
+                active_session_id = session_id_in.clone();
+            }
+            SessionBoundary::NewSessionRequired { previous_ended_at } => {
+                let unsum = db::unsummarized_range_for_session(&tx, &session_id_in)?;
+                let turns_to_summarize = if let Some(range) = unsum {
+                    db::list_turns_in_range(
+                        &tx,
+                        &domain_key,
+                        &session_id_in,
+                        range.from_turn_index,
+                        range.to_turn_index,
+                    )?
+                } else {
+                    Vec::new()
+                };
+                let new_session_id = uuid::Uuid::new_v4().to_string();
+                db::finalize_session(&tx, &session_id_in, &previous_ended_at)?;
+                db::create_session(&tx, &new_session_id, &now)?;
+                if !turns_to_summarize.is_empty() {
+                    let range_start = turns_to_summarize.first().unwrap().turn_index;
+                    let range_end = turns_to_summarize.last().unwrap().turn_index;
+                    pending.push(PendingSummary {
+                        session_id: session_id_in.clone(),
+                        kind: SummaryKind::CrossSession,
+                        range: (range_start, range_end),
+                        turns: turns_to_summarize,
+                        generated_at_override: Some(previous_ended_at),
+                    });
+                }
+                active_session_id = new_session_id;
+            }
+        }
+
+        user_turn_index = db::next_turn_index(&tx, &active_session_id)?;
+        user_created_at = db::current_iso_timestamp(&tx)?;
         db::put_turn(
             &tx,
             &domain_key,
-            &session_id,
-            turn_index,
+            &active_session_id,
+            user_turn_index,
             TurnRole::User,
             &operator_turn,
-            &created_at,
+            &user_created_at,
         )?;
-        db::increment_session_turn_count(&tx, &session_id)?;
-        let in_window = db::list_turns_for_inference(&tx, &domain_key, &session_id)?;
-        tx.commit().map_err(db::DbError::from)?;
-        (turn_index, created_at, in_window)
-    };
+        db::increment_session_turn_count(&tx, &active_session_id)?;
 
-    // Step 3 — build the inference request from the in-window history
-    // and call the provider with no locks held.
-    let messages: Vec<inference::Message> = in_window
-        .into_iter()
-        .map(|t| inference::Message {
+        let unsum_count = db::unsummarized_turn_count(&tx, &active_session_id)?;
+        let threshold =
+            (db::INFERENCE_WINDOW_TURNS + db::SUMMARIZATION_BATCH_SIZE) as i64;
+        if unsum_count > threshold {
+            let unsum = db::unsummarized_range_for_session(&tx, &active_session_id)?
+                .expect("unsummarized count > threshold implies range present");
+            let batch_end = unsum.from_turn_index + db::SUMMARIZATION_BATCH_SIZE as i64 - 1;
+            let turns_to_summarize = db::list_turns_in_range(
+                &tx,
+                &domain_key,
+                &active_session_id,
+                unsum.from_turn_index,
+                batch_end,
+            )?;
+            pending.push(PendingSummary {
+                session_id: active_session_id.clone(),
+                kind: SummaryKind::WithinSession,
+                range: (unsum.from_turn_index, batch_end),
+                turns: turns_to_summarize,
+                generated_at_override: None,
+            });
+        }
+
+        tx.commit().map_err(db::DbError::from)?;
+    }
+
+    // Phase 2 — run pending summarization calls (no locks). Cross-
+    // session first, within-session second; the order matters only
+    // when both fire in the same call (boundary AND threshold), and
+    // in that case the cross summary covers the OLD session while
+    // the within summary covers the NEW session, so they're
+    // independent. Sequencing is for readability.
+    let mut summary_contents: Vec<String> = Vec::with_capacity(pending.len());
+    for batch in &pending {
+        let content = run_summarization_call(provider, &batch.turns).await?;
+        summary_contents.push(content);
+    }
+
+    // Phase 3 — write summary rows + read context for the operator-
+    // facing call.
+    let in_window: Vec<DecryptedTurn>;
+    let summaries: Vec<DecryptedSummary>;
+    {
+        let domain_key = derive_conversation_key(vault_mutex)?;
+        let mut conn = lock_db(db_mutex)?;
+        let tx = conn.transaction().map_err(db::DbError::from)?;
+
+        for (batch, content) in pending.iter().zip(summary_contents.iter()) {
+            let generated_at = match &batch.generated_at_override {
+                Some(s) => s.clone(),
+                None => db::current_iso_timestamp(&tx)?,
+            };
+            db::put_summary(
+                &tx,
+                &domain_key,
+                &batch.session_id,
+                batch.kind,
+                batch.range,
+                content,
+                &generated_at,
+            )?;
+        }
+
+        in_window = db::list_turns_for_inference(&tx, &domain_key, &active_session_id)?;
+        summaries = db::list_summaries_for_inference(&tx, &domain_key, &active_session_id)?;
+        tx.commit().map_err(db::DbError::from)?;
+    }
+
+    // Phase 4 — operator-facing inference call (no locks). Synthetic
+    // assistant message carrying the prepended summaries goes first,
+    // then in-window verbatim turns in role order. The system prompt
+    // is the §4 (a3) character + output discipline composition,
+    // unchanged.
+    let mut messages: Vec<inference::Message> = Vec::with_capacity(in_window.len() + 1);
+    if !summaries.is_empty() {
+        messages.push(inference::Message {
+            role: inference::Role::Assistant,
+            content: format_summaries_as_synthetic_assistant(&summaries),
+        });
+    }
+    for t in in_window {
+        messages.push(inference::Message {
             role: turn_role_to_inference(t.role),
             content: t.content,
-        })
-        .collect();
+        });
+    }
     let request = inference::InferenceRequest {
         system_prompt: prompt::assemble_system_prompt().to_string(),
         messages,
     };
-    let response = state.inference.infer(request).await?;
+    let response = provider.infer(request).await?;
 
-    // Step 4 — re-derive the conversation key (defense in depth) and
-    // write the assistant turn under a fresh transaction.
-    let domain_key = {
-        let guard = state
-            .vault
-            .lock()
-            .map_err(|e| InferenceCommandError::Provider {
-                message: format!("vault lock poisoned: {e}"),
-            })?;
-        let vault_ref = guard
-            .as_ref()
-            .ok_or_else(|| InferenceCommandError::Provider {
-                message: "vault is locked".to_string(),
-            })?;
-        vault_ref.domain_key(Domain::Conversation)
-    };
-
+    // Phase 5 — write the assistant turn.
+    let domain_key = derive_conversation_key(vault_mutex)?;
     let (assistant_turn_index, assistant_created_at) = {
-        let mut conn_guard =
-            state.db.lock().map_err(|e| InferenceCommandError::Provider {
-                message: format!("db lock poisoned: {e}"),
-            })?;
-        let tx = conn_guard.transaction().map_err(db::DbError::from)?;
-        let turn_index = db::next_turn_index(&tx, &session_id)?;
+        let mut conn = lock_db(db_mutex)?;
+        let tx = conn.transaction().map_err(db::DbError::from)?;
+        let turn_index = db::next_turn_index(&tx, &active_session_id)?;
         let created_at = db::current_iso_timestamp(&tx)?;
         db::put_turn(
             &tx,
             &domain_key,
-            &session_id,
+            &active_session_id,
             turn_index,
             TurnRole::Assistant,
             &response.content,
             &created_at,
         )?;
-        db::increment_session_turn_count(&tx, &session_id)?;
+        db::increment_session_turn_count(&tx, &active_session_id)?;
         tx.commit().map_err(db::DbError::from)?;
         (turn_index, created_at)
     };
@@ -521,6 +756,7 @@ pub async fn infer(
             user: user_created_at,
             assistant: assistant_created_at,
         },
+        session_id: active_session_id,
     })
 }
 
@@ -600,12 +836,16 @@ mod tests {
         );
     }
 
-    // Wire-shape KAT for the §4 (b) InferResponse. The React side
-    // depends on this shape to splice the disk-authoritative turn
-    // indices and timestamps into its scrollback after each round-
-    // trip. Drift in any field name (assistant_content, turn_indices,
-    // created_at) or in the nested struct shapes (user/assistant
+    // Wire-shape KAT for InferResponse. The React side depends on
+    // this shape to splice the disk-authoritative turn indices and
+    // timestamps into its scrollback after each round-trip. Drift in
+    // any field name (assistant_content, turn_indices, created_at,
+    // session_id) or in the nested struct shapes (user/assistant
     // pairs) breaks the channel surface's optimistic-replace path.
+    //
+    // §4 (c) extends the §4 (b) shape with `session_id` so the React
+    // side stays in sync when the inactivity-gap boundary fires
+    // inside `infer` and rolls the session.
     #[test]
     fn infer_response_wire_shape_is_pinned() {
         use serde_json::{json, to_value};
@@ -620,6 +860,7 @@ mod tests {
                 user: "2026-05-01T12:00:01.000Z".into(),
                 assistant: "2026-05-01T12:00:02.000Z".into(),
             },
+            session_id: "s-current".into(),
         };
         assert_eq!(
             to_value(response).unwrap(),
@@ -629,8 +870,174 @@ mod tests {
                 "created_at": {
                     "user": "2026-05-01T12:00:01.000Z",
                     "assistant": "2026-05-01T12:00:02.000Z"
-                }
+                },
+                "session_id": "s-current"
             })
         );
+    }
+
+    // §4 (c) — integration tests for the summarization triggers in
+    // `infer_impl`. The Tauri command shells out to `infer_impl` so
+    // these tests can drive the same flow without a Tauri runtime.
+    // The stub provider is used so summarization round-trips are
+    // deterministic and don't burn API tokens.
+
+    use crate::crypto::Domain;
+    use crate::inference::StubProvider;
+    use crate::vault::setup_passphrase;
+    use rusqlite::Connection;
+    use tempfile::TempDir;
+
+    fn open_in_memory_with_migrations() -> Connection {
+        // The prod `db::open_and_migrate` resolves the operator's
+        // ~/.coo path; tests use the test-only `run_migrations` helper
+        // exposed by `db::test_support` instead.
+        let mut conn = Connection::open_in_memory().expect("in-memory open");
+        crate::db::test_support::run_migrations(&mut conn);
+        conn
+    }
+
+    fn setup_vault_in_temp() -> (TempDir, UnlockedVault) {
+        let dir = TempDir::new().unwrap();
+        let vault = setup_passphrase(dir.path(), b"operator-passphrase").unwrap();
+        (dir, vault)
+    }
+
+    fn seed_turns(
+        conn: &Connection,
+        vault: &UnlockedVault,
+        session_id: &str,
+        count: usize,
+    ) {
+        let key = vault.domain_key(Domain::Conversation);
+        for i in 0..count as i64 {
+            db::put_turn(
+                conn,
+                &key,
+                session_id,
+                i,
+                if i % 2 == 0 {
+                    TurnRole::User
+                } else {
+                    TurnRole::Assistant
+                },
+                &format!("turn {i}"),
+                "2026-05-01T12:00:00.000Z",
+            )
+            .unwrap();
+            db::increment_session_turn_count(conn, session_id).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn infer_command_triggers_summarization_when_threshold_exceeded() {
+        // Seed a session with INFERENCE_WINDOW_TURNS + SUMMARIZATION_BATCH_SIZE
+        // turns; the next infer call adds one more (operator turn) and
+        // pushes unsummarized count to threshold + 1, which trips the
+        // within-session summarizer for the oldest SUMMARIZATION_BATCH_SIZE.
+        let (_dir, vault) = setup_vault_in_temp();
+        let conn = open_in_memory_with_migrations();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        db::create_session(&conn, &session_id, "2026-05-01T12:00:00.000Z").unwrap();
+        let seed_count = db::INFERENCE_WINDOW_TURNS + db::SUMMARIZATION_BATCH_SIZE;
+        seed_turns(&conn, &vault, &session_id, seed_count);
+
+        let db_mutex = Mutex::new(conn);
+        let vault_mutex = Mutex::new(Some(vault));
+        let provider = StubProvider::new();
+
+        let response = infer_impl(
+            &db_mutex,
+            &vault_mutex,
+            &provider,
+            session_id.clone(),
+            "next operator turn".into(),
+        )
+        .await
+        .unwrap();
+
+        // Same session — the within-session threshold should not
+        // trigger a session boundary roll.
+        assert_eq!(response.session_id, session_id);
+
+        let conn = db_mutex.into_inner().unwrap();
+        let summary_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_summary WHERE session_id = ?1",
+                rusqlite::params![&session_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            summary_count, 1,
+            "exactly one within-session summary must have been written"
+        );
+
+        let kind: String = conn
+            .query_row(
+                "SELECT summary_kind FROM conversation_summary WHERE session_id = ?1",
+                rusqlite::params![&session_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "within_session");
+
+        let sumthrough: i64 = conn
+            .query_row(
+                "SELECT summarized_through_turn_index FROM conversation_session WHERE id = ?1",
+                rusqlite::params![&session_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sumthrough,
+            (db::SUMMARIZATION_BATCH_SIZE as i64) - 1,
+            "summarized_through_turn_index must advance to cover the oldest batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn infer_command_does_not_trigger_summarization_below_threshold() {
+        // Seed a session well below threshold; infer should add one
+        // operator turn + one assistant turn and write no summaries.
+        let (_dir, vault) = setup_vault_in_temp();
+        let conn = open_in_memory_with_migrations();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        db::create_session(&conn, &session_id, "2026-05-01T12:00:00.000Z").unwrap();
+        seed_turns(&conn, &vault, &session_id, 5);
+
+        let db_mutex = Mutex::new(conn);
+        let vault_mutex = Mutex::new(Some(vault));
+        let provider = StubProvider::new();
+
+        let response = infer_impl(
+            &db_mutex,
+            &vault_mutex,
+            &provider,
+            session_id.clone(),
+            "another turn".into(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.session_id, session_id);
+
+        let conn = db_mutex.into_inner().unwrap();
+        let summary_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM conversation_summary", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            summary_count, 0,
+            "no summary should be written below threshold"
+        );
+
+        let sumthrough: i64 = conn
+            .query_row(
+                "SELECT summarized_through_turn_index FROM conversation_session WHERE id = ?1",
+                rusqlite::params![&session_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sumthrough, -1, "marker must remain at default");
     }
 }

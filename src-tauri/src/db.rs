@@ -31,10 +31,30 @@ const SCHEMA_VERSION_V1: i64 = 1;
 // This is the in-window tier of RAPPORT-STATE-MODEL.md §4.1's three-tier
 // retention model. Tiers 2 (within-session summaries) and 3 (cross-
 // session summaries) ship in §4 (c) and replace dropped turns with in-
-// character summaries. Until §4 (c) lands, turns past the window are
-// simply not sent to inference — they remain on disk and visible in
-// the UI.
+// character summaries. Older-than-window turns past the §4 (c)
+// summarization threshold are replaced in inference context by
+// `<SummaryStanza>` summaries; `list_turns_for_inference` still caps
+// the verbatim turns sent.
 pub const INFERENCE_WINDOW_TURNS: usize = 100;
+
+// §4 (c) — inactivity threshold that closes a conversation session.
+// When a turn is appended and the gap between its `created_at` and
+// the current time exceeds this value, the existing session is
+// finalized (ended_at set + remaining unsummarized turns rolled into
+// a cross_session summary) and a new session is created.
+//
+// 6 hours lands "evening conversation continued the next morning" as
+// a new session and "left for lunch, came back" as the same session,
+// which matches how the operator narrates conversational continuity.
+pub const SESSION_INACTIVITY_GAP_HOURS: i64 = 6;
+
+// §4 (c) — number of oldest unsummarized turns rolled into one
+// within_session summary when the threshold trips. The threshold
+// itself is `INFERENCE_WINDOW_TURNS + SUMMARIZATION_BATCH_SIZE`;
+// trips fire only when there are at least this many turns to
+// reasonably summarize, amortizing the per-turn latency hit of the
+// summarization round-trip.
+pub const SUMMARIZATION_BATCH_SIZE: usize = 30;
 
 // SQLite strftime format used for plaintext `created_at` / `started_at`
 // columns. UTC, ISO 8601 with millisecond precision and explicit `Z`
@@ -182,6 +202,52 @@ fn migrations() -> Migrations<'static> {
             ) STRICT;
             CREATE INDEX idx_conversation_turn_session_index
                 ON conversation_turn(session_id, turn_index);",
+        ),
+        // §4 (c) — in-character summarization layer.
+        //
+        // `conversation_summary` carries one summary row per
+        // summarization event. `summary_kind` distinguishes within-
+        // session summaries (cover older turns of a still-running
+        // session, replace them in inference context as the session
+        // grows) from cross-session summaries (cover an entire prior
+        // session, included in inference context for all subsequent
+        // sessions). `covers_turn_range_start` / `covers_turn_range_end`
+        // are split from `RAPPORT-STATE-MODEL.md` §2.4's spec'd
+        // `covers_turn_range: [int, int]` because SQLite STRICT tables
+        // don't have an array type — semantics unchanged.
+        //
+        // `ciphertext` carries the v1 AEAD bundle under
+        // Domain::Conversation — the summary's content (Exile's own
+        // recollection) is the same sensitivity tier as the raw turns
+        // it replaces.
+        //
+        // `generated_at` is plaintext for ordering. Same trade as the
+        // other plaintext timestamps.
+        //
+        // The `summarized_through_turn_index` column on
+        // `conversation_session` tracks the highest turn_index
+        // covered by a within_session summary; the inference-context
+        // assembly uses it to know which turns are already
+        // summarized. Default -1 means "nothing summarized yet" —
+        // existing session rows from migration #3 get -1
+        // retroactively, treating all their turns as raw. Strict-
+        // additive per RAPPORT-STATE-MODEL.md §7.1.
+        M::up(
+            "CREATE TABLE conversation_summary (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                covers_turn_range_start INTEGER NOT NULL,
+                covers_turn_range_end INTEGER NOT NULL,
+                summary_kind TEXT NOT NULL CHECK (summary_kind IN ('within_session', 'cross_session')),
+                ciphertext BLOB NOT NULL,
+                generated_at TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES conversation_session(id)
+            ) STRICT;
+            CREATE INDEX idx_conversation_summary_session
+                ON conversation_summary(session_id, generated_at);
+            ALTER TABLE conversation_session
+                ADD COLUMN summarized_through_turn_index INTEGER NOT NULL DEFAULT -1;",
         ),
     ])
 }
@@ -502,6 +568,402 @@ pub fn increment_session_turn_count(
         params![session_id],
     )?;
     Ok(())
+}
+
+// §4 (c) — in-character summarization helpers.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryKind {
+    WithinSession,
+    CrossSession,
+}
+
+impl SummaryKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            SummaryKind::WithinSession => "within_session",
+            SummaryKind::CrossSession => "cross_session",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "within_session" => Some(SummaryKind::WithinSession),
+            "cross_session" => Some(SummaryKind::CrossSession),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecryptedSummary {
+    pub session_id: String,
+    pub kind: SummaryKind,
+    pub covers_turn_range_start: i64,
+    pub covers_turn_range_end: i64,
+    pub content: String,
+    pub generated_at: String,
+}
+
+// The bounded range of unsummarized turn indices for a session.
+// Returned as `Some` only when there is at least one unsummarized
+// turn; `None` means everything is already covered by a summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnsummarizedRange {
+    pub from_turn_index: i64,
+    pub to_turn_index: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionBoundary {
+    Continue,
+    NewSessionRequired { previous_ended_at: String },
+}
+
+// Returns the session's existing `summarized_through_turn_index` and
+// the highest `turn_index` actually present in `conversation_turn`.
+// Used as the basis for unsummarized-range computation and for the
+// within-session summarization threshold check.
+fn session_summarization_bounds(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<(i64, Option<i64>), DbError> {
+    let summarized_through: i64 = conn.query_row(
+        "SELECT summarized_through_turn_index
+         FROM conversation_session WHERE id = ?1",
+        params![session_id],
+        |r| r.get(0),
+    )?;
+    let max_turn: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(turn_index) FROM conversation_turn WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    Ok((summarized_through, max_turn))
+}
+
+// Returns the unsummarized [from, to] turn-index range for a session,
+// inclusive on both ends. `None` if everything is summarized or the
+// session has no turns.
+pub fn unsummarized_range_for_session(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<UnsummarizedRange>, DbError> {
+    let (summarized_through, max_turn) = session_summarization_bounds(conn, session_id)?;
+    let max = match max_turn {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+    let from = summarized_through + 1;
+    if from > max {
+        return Ok(None);
+    }
+    Ok(Some(UnsummarizedRange {
+        from_turn_index: from,
+        to_turn_index: max,
+    }))
+}
+
+// Returns the count of unsummarized turns in the given session.
+// Equivalent to `unsummarized_range_for_session`'s span when present;
+// 0 when None. Cheap helper for the within-session threshold check.
+pub fn unsummarized_turn_count(conn: &Connection, session_id: &str) -> Result<i64, DbError> {
+    Ok(unsummarized_range_for_session(conn, session_id)?
+        .map(|r| r.to_turn_index - r.from_turn_index + 1)
+        .unwrap_or(0))
+}
+
+// Decrypts and returns turns in the given inclusive range, ascending
+// by turn_index. Used as the input to the summarization inference
+// call.
+pub fn list_turns_in_range(
+    conn: &Connection,
+    domain_key: &DomainKey,
+    session_id: &str,
+    from_turn_index: i64,
+    to_turn_index: i64,
+) -> Result<Vec<DecryptedTurn>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT turn_index, role, ciphertext, created_at
+         FROM conversation_turn
+         WHERE session_id = ?1 AND turn_index BETWEEN ?2 AND ?3
+         ORDER BY turn_index ASC",
+    )?;
+    let rows = stmt.query_map(
+        params![session_id, from_turn_index, to_turn_index],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    )?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (turn_index, role_s, bundle, created_at) = row?;
+        let role = TurnRole::from_str(&role_s).ok_or_else(|| {
+            DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                format!("unknown role {role_s:?} in conversation_turn").into(),
+            ))
+        })?;
+        let content_bytes = decrypt(domain_key, &bundle)?;
+        let content = String::from_utf8(content_bytes).map_err(|e| {
+            DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Blob,
+                format!("turn ciphertext decoded to invalid utf-8: {e}").into(),
+            ))
+        })?;
+        out.push(DecryptedTurn {
+            turn_index,
+            role,
+            content,
+            created_at,
+        });
+    }
+    Ok(out)
+}
+
+// Inserts a summary row and updates the session's
+// `summarized_through_turn_index` to the new high-water mark. The
+// caller is responsible for wrapping this in a transaction together
+// with any other related writes.
+pub fn put_summary(
+    conn: &Connection,
+    domain_key: &DomainKey,
+    session_id: &str,
+    summary_kind: SummaryKind,
+    covers_range: (i64, i64),
+    summary_content: &str,
+    generated_at: &str,
+) -> Result<(), DbError> {
+    let bundle = encrypt(domain_key, summary_content.as_bytes())?;
+    let id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO conversation_summary
+            (id, session_id, covers_turn_range_start, covers_turn_range_end,
+             summary_kind, ciphertext, generated_at, schema_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            id,
+            session_id,
+            covers_range.0,
+            covers_range.1,
+            summary_kind.as_str(),
+            bundle,
+            generated_at,
+            SCHEMA_VERSION_V1,
+        ],
+    )?;
+    // Advance the session's high-water mark only if this summary
+    // covers further than what's already recorded — protects against
+    // out-of-order summary writes regressing the marker.
+    conn.execute(
+        "UPDATE conversation_session
+         SET summarized_through_turn_index = MAX(summarized_through_turn_index, ?1)
+         WHERE id = ?2",
+        params![covers_range.1, session_id],
+    )?;
+    Ok(())
+}
+
+// Returns summaries to prepend to inference context: all
+// cross_session summaries from prior sessions plus all within_session
+// summaries for the current session.
+pub fn list_summaries_for_inference(
+    conn: &Connection,
+    domain_key: &DomainKey,
+    current_session_id: &str,
+) -> Result<Vec<DecryptedSummary>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, summary_kind, covers_turn_range_start, covers_turn_range_end,
+                ciphertext, generated_at
+         FROM conversation_summary
+         WHERE summary_kind = 'cross_session'
+            OR (summary_kind = 'within_session' AND session_id = ?1)
+         ORDER BY generated_at ASC",
+    )?;
+    let rows = stmt.query_map(params![current_session_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, Vec<u8>>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (session_id, kind_s, range_start, range_end, bundle, generated_at) = row?;
+        let kind = SummaryKind::from_str(&kind_s).ok_or_else(|| {
+            DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                format!("unknown summary_kind {kind_s:?} in conversation_summary").into(),
+            ))
+        })?;
+        let content_bytes = decrypt(domain_key, &bundle)?;
+        let content = String::from_utf8(content_bytes).map_err(|e| {
+            DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Blob,
+                format!("summary ciphertext decoded to invalid utf-8: {e}").into(),
+            ))
+        })?;
+        out.push(DecryptedSummary {
+            session_id,
+            kind,
+            covers_turn_range_start: range_start,
+            covers_turn_range_end: range_end,
+            content,
+            generated_at,
+        });
+    }
+    Ok(out)
+}
+
+// Marks a session as ended at the given timestamp. Used when the
+// inactivity-gap boundary fires.
+pub fn finalize_session(
+    conn: &Connection,
+    session_id: &str,
+    ended_at: &str,
+) -> Result<(), DbError> {
+    conn.execute(
+        "UPDATE conversation_session SET ended_at = ?1 WHERE id = ?2",
+        params![ended_at, session_id],
+    )?;
+    Ok(())
+}
+
+// Computes whether an incoming turn at `incoming_turn_at` should
+// continue the given session or trigger a new one. The check is
+// against the most recent turn's `created_at`; if no turns exist
+// yet, Continue. Plaintext ISO timestamps are compared as strings
+// — UTC + ISO 8601 lexicographic ordering is correct.
+pub fn detect_session_boundary(
+    conn: &Connection,
+    current_session_id: &str,
+    incoming_turn_at: &str,
+) -> Result<SessionBoundary, DbError> {
+    let last_at: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM conversation_turn
+             WHERE session_id = ?1
+             ORDER BY turn_index DESC LIMIT 1",
+            params![current_session_id],
+            |r| r.get(0),
+        )
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    let last = match last_at {
+        Some(s) => s,
+        None => return Ok(SessionBoundary::Continue),
+    };
+    if hours_between_iso(&last, incoming_turn_at) >= SESSION_INACTIVITY_GAP_HOURS {
+        Ok(SessionBoundary::NewSessionRequired {
+            previous_ended_at: last,
+        })
+    } else {
+        Ok(SessionBoundary::Continue)
+    }
+}
+
+// Compute hours between two ISO 8601 UTC timestamps in the format
+// produced by `current_iso_timestamp`. Returns `i64::MAX` if either
+// timestamp is malformed — fail-loud-ish: an unparseable timestamp
+// is treated as "infinitely long ago", which trips the boundary
+// rather than silently continuing a session against a corrupt clock.
+fn hours_between_iso(earlier: &str, later: &str) -> i64 {
+    match (parse_iso_seconds(earlier), parse_iso_seconds(later)) {
+        (Some(e), Some(l)) => (l - e).max(0) / 3600,
+        _ => i64::MAX,
+    }
+}
+
+// Parse an ISO 8601 UTC timestamp matching SQLite's
+// `strftime('%Y-%m-%dT%H:%M:%fZ', ...)` output and return seconds
+// since the epoch. Hand-rolled because the project does not depend on
+// `chrono` / `time`. Accepts either "...Z" or "...+00:00" (defensive
+// against a future format tweak); rejects anything outside the
+// expected character class.
+fn parse_iso_seconds(s: &str) -> Option<i64> {
+    // Expected shape: YYYY-MM-DDTHH:MM:SS[.fff]Z
+    // Length is 20 (no fraction) to 24 (with .fff), all characters
+    // ASCII. We parse the date and time integers manually.
+    let bytes = s.as_bytes();
+    if bytes.len() < 20 {
+        return None;
+    }
+    let year: i64 = std::str::from_utf8(&bytes[0..4]).ok()?.parse().ok()?;
+    if bytes[4] != b'-' {
+        return None;
+    }
+    let month: u32 = std::str::from_utf8(&bytes[5..7]).ok()?.parse().ok()?;
+    if bytes[7] != b'-' {
+        return None;
+    }
+    let day: u32 = std::str::from_utf8(&bytes[8..10]).ok()?.parse().ok()?;
+    if bytes[10] != b'T' {
+        return None;
+    }
+    let hour: u32 = std::str::from_utf8(&bytes[11..13]).ok()?.parse().ok()?;
+    if bytes[13] != b':' {
+        return None;
+    }
+    let minute: u32 = std::str::from_utf8(&bytes[14..16]).ok()?.parse().ok()?;
+    if bytes[16] != b':' {
+        return None;
+    }
+    let second: u32 = std::str::from_utf8(&bytes[17..19]).ok()?.parse().ok()?;
+    Some(days_since_epoch(year, month, day) * 86_400
+        + i64::from(hour) * 3600
+        + i64::from(minute) * 60
+        + i64::from(second))
+}
+
+// Civil-from-days algorithm (Howard Hinnant) for converting a
+// (year, month, day) tuple to days since 1970-01-01 without a
+// timezone library. Handles negative years correctly.
+fn days_since_epoch(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let m = month as u64;
+    let d = day as u64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe as i64 - 719_468
+}
+
+// §4 (c) — test-only helpers shared with `commands::tests`. The
+// production migrations function is private so prod callers go
+// through `open_and_migrate`; the test path needs an in-memory
+// connection migrated to the latest schema without touching the
+// operator's home directory. This module exposes that for tests
+// only.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::migrations;
+
+    pub fn run_migrations(conn: &mut rusqlite::Connection) {
+        migrations()
+            .to_latest(conn)
+            .expect("migrations to latest must succeed in test setup");
+    }
 }
 
 #[cfg(test)]
@@ -971,6 +1433,283 @@ mod tests {
         assert_eq!(
             latest_session_id(&conn).unwrap(),
             Some("s-new".to_string())
+        );
+    }
+
+    // §4 (c) — schema and helper tests for in-character summarization.
+
+    #[test]
+    fn conversation_summary_roundtrip() {
+        let conn = open_in_memory();
+        conn.execute(
+            "INSERT INTO conversation_session (id, started_at, schema_version)
+             VALUES ('s-1', '2026-05-01T12:00:00.000Z', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_summary
+                (id, session_id, covers_turn_range_start, covers_turn_range_end,
+                 summary_kind, ciphertext, generated_at, schema_version)
+             VALUES ('sum-1', 's-1', 0, 29, 'within_session', X'00',
+                     '2026-05-01T13:00:00.000Z', 1)",
+            [],
+        )
+        .unwrap();
+        let (kind, start, end, generated_at): (String, i64, i64, String) = conn
+            .query_row(
+                "SELECT summary_kind, covers_turn_range_start, covers_turn_range_end,
+                        generated_at
+                 FROM conversation_summary WHERE id = 'sum-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "within_session");
+        assert_eq!(start, 0);
+        assert_eq!(end, 29);
+        assert_eq!(generated_at, "2026-05-01T13:00:00.000Z");
+    }
+
+    #[test]
+    fn conversation_summary_kind_check_enforced() {
+        let conn = open_in_memory();
+        conn.execute(
+            "INSERT INTO conversation_session (id, started_at, schema_version)
+             VALUES ('s-1', '2026-05-01T12:00:00.000Z', 1)",
+            [],
+        )
+        .unwrap();
+        let bad = conn.execute(
+            "INSERT INTO conversation_summary
+                (id, session_id, covers_turn_range_start, covers_turn_range_end,
+                 summary_kind, ciphertext, generated_at, schema_version)
+             VALUES ('sum-bad', 's-1', 0, 29, 'invalid_kind', X'00',
+                     '2026-05-01T13:00:00.000Z', 1)",
+            [],
+        );
+        assert!(bad.is_err(), "summary_kind CHECK must reject unknown values");
+    }
+
+    #[test]
+    fn conversation_summary_encrypted_roundtrip() {
+        // End-to-end: vault → Domain::Conversation key → encrypt
+        // summary content → INSERT → SELECT → decrypt.
+        let (_dir, key) = conversation_key();
+        let conn = open_in_memory();
+        create_session(&conn, "s-1", "2026-05-01T12:00:00.000Z").unwrap();
+        put_summary(
+            &conn,
+            &key,
+            "s-1",
+            SummaryKind::WithinSession,
+            (0, 29),
+            "we talked about the consulting reply.",
+            "2026-05-01T13:00:00.000Z",
+        )
+        .unwrap();
+        let summaries = list_summaries_for_inference(&conn, &key, "s-1").unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0].content,
+            "we talked about the consulting reply."
+        );
+        assert_eq!(summaries[0].kind, SummaryKind::WithinSession);
+        assert_eq!(summaries[0].covers_turn_range_start, 0);
+        assert_eq!(summaries[0].covers_turn_range_end, 29);
+    }
+
+    #[test]
+    fn conversation_session_summarized_through_default_minus_one() {
+        // ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT -1 must apply
+        // retroactively to rows created before the migration ran AND
+        // to fresh rows that don't specify the column.
+        let conn = open_in_memory();
+        create_session(&conn, "s-1", "2026-05-01T12:00:00.000Z").unwrap();
+        let sumthrough: i64 = conn
+            .query_row(
+                "SELECT summarized_through_turn_index
+                 FROM conversation_session WHERE id = 's-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sumthrough, -1, "default must be -1");
+    }
+
+    #[test]
+    fn unsummarized_range_for_session_returns_full_range_when_nothing_summarized() {
+        let (_dir, key) = conversation_key();
+        let conn = open_in_memory();
+        create_session(&conn, "s-1", "2026-05-01T12:00:00.000Z").unwrap();
+        for i in 0..5_i64 {
+            put_turn(
+                &conn,
+                &key,
+                "s-1",
+                i,
+                TurnRole::User,
+                &format!("turn {i}"),
+                "2026-05-01T12:00:01.000Z",
+            )
+            .unwrap();
+        }
+        let range = unsummarized_range_for_session(&conn, "s-1").unwrap();
+        assert_eq!(
+            range,
+            Some(UnsummarizedRange {
+                from_turn_index: 0,
+                to_turn_index: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn unsummarized_range_for_session_returns_none_when_all_summarized() {
+        let (_dir, key) = conversation_key();
+        let conn = open_in_memory();
+        create_session(&conn, "s-1", "2026-05-01T12:00:00.000Z").unwrap();
+        for i in 0..5_i64 {
+            put_turn(
+                &conn,
+                &key,
+                "s-1",
+                i,
+                TurnRole::User,
+                &format!("turn {i}"),
+                "2026-05-01T12:00:01.000Z",
+            )
+            .unwrap();
+        }
+        put_summary(
+            &conn,
+            &key,
+            "s-1",
+            SummaryKind::WithinSession,
+            (0, 4),
+            "covered the lot.",
+            "2026-05-01T13:00:00.000Z",
+        )
+        .unwrap();
+        let range = unsummarized_range_for_session(&conn, "s-1").unwrap();
+        assert_eq!(range, None);
+    }
+
+    #[test]
+    fn put_summary_and_list_summaries_for_inference_roundtrip() {
+        let (_dir, key) = conversation_key();
+        let conn = open_in_memory();
+        create_session(&conn, "s-1", "2026-05-01T12:00:00.000Z").unwrap();
+        put_summary(
+            &conn,
+            &key,
+            "s-1",
+            SummaryKind::WithinSession,
+            (0, 29),
+            "first stretch.",
+            "2026-05-01T13:00:00.000Z",
+        )
+        .unwrap();
+        let summaries = list_summaries_for_inference(&conn, &key, "s-1").unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].session_id, "s-1");
+        assert_eq!(summaries[0].kind, SummaryKind::WithinSession);
+        assert_eq!(summaries[0].content, "first stretch.");
+    }
+
+    #[test]
+    fn list_summaries_for_inference_includes_cross_session_from_prior_sessions() {
+        let (_dir, key) = conversation_key();
+        let conn = open_in_memory();
+        create_session(&conn, "s-old", "2026-05-01T08:00:00.000Z").unwrap();
+        create_session(&conn, "s-new", "2026-05-01T20:00:00.000Z").unwrap();
+        // Cross-session summary for the OLD session.
+        put_summary(
+            &conn,
+            &key,
+            "s-old",
+            SummaryKind::CrossSession,
+            (0, 49),
+            "morning thread.",
+            "2026-05-01T19:50:00.000Z",
+        )
+        .unwrap();
+        // Within-session summary for the OLD session — should NOT
+        // appear when querying for the NEW session.
+        put_summary(
+            &conn,
+            &key,
+            "s-old",
+            SummaryKind::WithinSession,
+            (0, 29),
+            "morning batch one.",
+            "2026-05-01T15:00:00.000Z",
+        )
+        .unwrap();
+        let summaries = list_summaries_for_inference(&conn, &key, "s-new").unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].session_id, "s-old");
+        assert_eq!(summaries[0].kind, SummaryKind::CrossSession);
+        assert_eq!(summaries[0].content, "morning thread.");
+    }
+
+    #[test]
+    fn list_summaries_for_inference_includes_within_session_for_current_only() {
+        let (_dir, key) = conversation_key();
+        let conn = open_in_memory();
+        create_session(&conn, "s-1", "2026-05-01T08:00:00.000Z").unwrap();
+        create_session(&conn, "s-2", "2026-05-01T20:00:00.000Z").unwrap();
+        put_summary(
+            &conn,
+            &key,
+            "s-1",
+            SummaryKind::WithinSession,
+            (0, 29),
+            "session 1 batch.",
+            "2026-05-01T10:00:00.000Z",
+        )
+        .unwrap();
+        put_summary(
+            &conn,
+            &key,
+            "s-2",
+            SummaryKind::WithinSession,
+            (0, 29),
+            "session 2 batch.",
+            "2026-05-01T22:00:00.000Z",
+        )
+        .unwrap();
+        let summaries_for_s2 = list_summaries_for_inference(&conn, &key, "s-2").unwrap();
+        assert_eq!(summaries_for_s2.len(), 1);
+        assert_eq!(summaries_for_s2[0].content, "session 2 batch.");
+    }
+
+    #[test]
+    fn detect_session_boundary_at_six_hours() {
+        let (_dir, key) = conversation_key();
+        let conn = open_in_memory();
+        create_session(&conn, "s-1", "2026-05-01T12:00:00.000Z").unwrap();
+        put_turn(
+            &conn,
+            &key,
+            "s-1",
+            0,
+            TurnRole::User,
+            "first",
+            "2026-05-01T12:00:00.000Z",
+        )
+        .unwrap();
+        // T + 5h59m → Continue.
+        let result = detect_session_boundary(&conn, "s-1", "2026-05-01T17:59:00.000Z").unwrap();
+        assert_eq!(result, SessionBoundary::Continue);
+        // T + 6h01m → NewSessionRequired with previous_ended_at = the
+        // most-recent turn's created_at.
+        let result = detect_session_boundary(&conn, "s-1", "2026-05-01T18:01:00.000Z").unwrap();
+        assert_eq!(
+            result,
+            SessionBoundary::NewSessionRequired {
+                previous_ended_at: "2026-05-01T12:00:00.000Z".to_string(),
+            }
         );
     }
 }

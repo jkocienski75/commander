@@ -67,9 +67,27 @@ export type TurnPayload = {
   created_at: string; // ISO 8601, UTC, ms precision
 };
 
+export type SummaryKind = "within_session" | "cross_session";
+
+// §4 (c) — surfaced summary covering a turn range. Rendered by the
+// React `<SummaryStanza>` component in place of the turns it covers
+// (within_session) or as a separate stanza at the top of scrollback
+// (cross_session). Wire shape mirrors `commands::SummaryPayload`.
+export type SummaryPayload = {
+  session_id: string;
+  kind: SummaryKind;
+  covers_turn_range_start: number;
+  covers_turn_range_end: number;
+  content: string;
+  generated_at: string;
+};
+
 export type LoadConversationResponse = {
   session_id: string;
   turns: TurnPayload[];
+  // §4 (c) — cross-session summaries (from prior sessions) plus
+  // within-session summaries for the current session.
+  summaries: SummaryPayload[];
 };
 
 export type ConversationCommandError =
@@ -81,6 +99,11 @@ export type InferResponse = {
   assistant_content: string;
   turn_indices: { user: number; assistant: number };
   created_at: { user: string; assistant: string };
+  // §4 (c) — the (possibly new) session_id the operator turn was
+  // written into. Equals the session_id passed to `infer` when no
+  // boundary fired; differs when the inactivity-gap boundary
+  // triggered a session roll inside the command.
+  session_id: string;
 };
 
 export const loadConversation = (): Promise<LoadConversationResponse> =>

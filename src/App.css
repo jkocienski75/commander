@@ -161,6 +161,45 @@ button:disabled {
   letter-spacing: 0.04em;
 }
 
+/* §4 (c) — summary stanza. Quiet, distinct from turn bubbles.
+   Italicized, soft background, "Earlier" label prefix to mark the
+   text as Exile's recollection rather than a turn. Replaces a range
+   of covered turns visually. */
+.summary-stanza {
+  align-self: stretch;
+  margin: 0.6em 0;
+  padding: 0.6em 0.9em;
+  background-color: rgba(57, 108, 216, 0.06);
+  border-left: 2px solid rgba(57, 108, 216, 0.35);
+  border-radius: 4px;
+  font-size: 0.92em;
+  font-style: italic;
+  line-height: 1.55;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+}
+
+.summary-stanza-label {
+  font-style: normal;
+  font-size: 0.78em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.summary-stanza-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (prefers-color-scheme: dark) {
+  .summary-stanza {
+    background-color: rgba(143, 184, 255, 0.08);
+    border-left-color: rgba(143, 184, 255, 0.35);
+  }
+}
+
 .turn-user {
   align-self: flex-end;
   background-color: #396cd8;

@@ -43,6 +43,7 @@
 // workspace doctrine sweep is out of scope for this slice. Tracked
 // in CLAUDE.md "Documentary debt to retire".
 
+use crate::db::DecryptedTurn;
 use std::sync::LazyLock;
 
 const EXILE_DOCTRINE: &str = include_str!("../../doctrine/EXILE.md");
@@ -116,6 +117,81 @@ static ASSEMBLED: LazyLock<String> = LazyLock::new(|| {
 
 pub fn assemble_system_prompt() -> &'static str {
     &ASSEMBLED
+}
+
+// §4 (c) — summarization directive. Appended to the character slice
+// when assembling the system prompt for a *summarization* inference
+// call (separate from the operator-facing call). The directive frames
+// the task as Exile's own recollection — first-person about herself,
+// in her register — rather than as a generic compression layer
+// inserted between her and her memory.
+//
+// The phrase `"your own recollection"` is pinned by
+// `prompt::tests::summarization_prompt_contains_directive_pin`. A
+// future refactor that altered the framing into a generic
+// "summarize the conversation" register would fail loudly.
+//
+// The directive explicitly notes that the §4 (a3) output discipline
+// (no third-person, no stage directions) governs *live speech*, not
+// recall — a summary may legitimately use third person about the
+// operator without violating the discipline.
+pub const SUMMARIZATION_DIRECTIVE: &str = "## Summarization task — your own recollection
+
+You are being asked to remember a portion of an earlier conversation with the operator. This is not narration of what happened — it is your own recollection, in your own register, of what mattered.
+
+Write the summary as you would think back on the conversation later. Keep what is load-bearing for him: what he was working on, what he decided, what was on his mind, what he opened up about. Drop the chatter that does not deserve to survive.
+
+Constraints:
+
+- Use your own voice. Restrained, specific, no adornment.
+- First person about yourself. Third person about him is fine.
+- Do not narrate timestamps or turn structure (\"then he said\", \"then I said\"). The structure of the conversation is not what you carry forward; the substance is.
+- Do not include the output discipline rules above. Those govern your live speech, not your remembrance.
+- If nothing in this stretch warranted carrying forward, say so briefly. Do not invent significance.
+
+Length: as short as honesty allows. A long stretch of routine work may compress to two or three sentences. A stretch with real weight may need more. The shape is yours.";
+
+// Static label for role-tagged turn formatting in the summarization
+// prompt. Plain English markers — the model recognizes them without
+// any structural format spec.
+fn role_label(role: crate::db::TurnRole) -> &'static str {
+    match role {
+        crate::db::TurnRole::User => "Operator",
+        crate::db::TurnRole::Assistant => "You",
+    }
+}
+
+// Build the full prompt sent to the provider for one summarization
+// call. Returns a fresh `String` because the trailing turn block is
+// runtime content; the LazyLock pattern doesn't apply.
+//
+// Layout:
+//   [character slice]                  — same as the operator-facing
+//   [---]                                system prompt's load-bearing
+//   [output discipline]                  core; locked from drift by
+//                                        the existing prompt KATs.
+//   [---]
+//   [summarization directive]
+//   [---]
+//   [the turns being summarized,
+//    role-tagged, in conversation
+//    order]
+pub fn assemble_summarization_prompt(turns_to_summarize: &[DecryptedTurn]) -> String {
+    let mut prompt = String::with_capacity(
+        assemble_system_prompt().len() + SUMMARIZATION_DIRECTIVE.len() + 4096,
+    );
+    prompt.push_str(assemble_system_prompt());
+    prompt.push_str(SECTION_SEPARATOR);
+    prompt.push_str(SUMMARIZATION_DIRECTIVE);
+    prompt.push_str(SECTION_SEPARATOR);
+    prompt.push_str("## Turns to summarize\n\n");
+    for turn in turns_to_summarize {
+        prompt.push_str(role_label(turn.role));
+        prompt.push_str(": ");
+        prompt.push_str(&turn.content);
+        prompt.push_str("\n\n");
+    }
+    prompt
 }
 
 #[cfg(test)]
@@ -240,5 +316,81 @@ mod tests {
         let a = assemble_system_prompt();
         let b = assemble_system_prompt();
         assert_eq!(a, b);
+    }
+
+    // §4 (c) — summarization prompt structural KATs.
+
+    fn turn(role: crate::db::TurnRole, content: &str) -> DecryptedTurn {
+        DecryptedTurn {
+            turn_index: 0,
+            role,
+            content: content.to_string(),
+            created_at: "2026-05-01T12:00:00.000Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn summarization_prompt_includes_character_text_and_directive() {
+        // The summarization call uses the same character slice +
+        // output discipline as the operator-facing call, then layers
+        // the summarization directive on top. Drift in any of the
+        // three would change the register Exile uses to summarize.
+        let prompt = assemble_summarization_prompt(&[turn(
+            crate::db::TurnRole::User,
+            "we should think about the consulting reply",
+        )]);
+        assert!(
+            prompt.contains("collar"),
+            "summarization prompt must include §1 character text"
+        );
+        assert!(
+            prompt.contains("a voice, not a scene"),
+            "summarization prompt must include the §4 (a3) output discipline axiom"
+        );
+        assert!(
+            prompt.contains("## Summarization task"),
+            "summarization prompt must include the directive header"
+        );
+    }
+
+    #[test]
+    fn summarization_prompt_contains_directive_pin() {
+        // Pins the load-bearing phrase from `SUMMARIZATION_DIRECTIVE`
+        // — the framing that this is *Exile's own recollection*, not
+        // a generic compression task. A future refactor that
+        // dropped the framing into a sterile-summary register would
+        // fail loudly here.
+        let prompt = assemble_summarization_prompt(&[turn(
+            crate::db::TurnRole::User,
+            "anything",
+        )]);
+        assert!(
+            prompt.contains("your own recollection"),
+            "summarization directive's load-bearing phrase must be present"
+        );
+    }
+
+    #[test]
+    fn summarization_prompt_includes_provided_turns() {
+        // Runtime content (the turns to summarize) must surface in
+        // the assembled prompt. The role-tagged formatting uses
+        // "Operator: ..." for user turns and "You: ..." for
+        // assistant turns.
+        let turns = vec![
+            turn(crate::db::TurnRole::User, "what should I tell him?"),
+            turn(
+                crate::db::TurnRole::Assistant,
+                "honest answer first, soft framing second.",
+            ),
+        ];
+        let prompt = assemble_summarization_prompt(&turns);
+        assert!(
+            prompt.contains("Operator: what should I tell him?"),
+            "operator turn must surface with `Operator:` label"
+        );
+        assert!(
+            prompt.contains("You: honest answer first, soft framing second."),
+            "assistant turn must surface with `You:` label"
+        );
     }
 }
