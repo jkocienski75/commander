@@ -3,9 +3,9 @@
 
 > **Stability tier: Schema spec is revisable as the project advances; the behavioral commitments — encryption at rest, no silent writes, state survives version updates, the friendship floor never erodes — are tied to the load-bearing rules in `EXILE.md` §2 and the product-specific rules in `coo/CLAUDE.md`, and do not move.** Field additions are expected and welcome. Semantic changes to existing fields require explicit migration discipline (§7).
 >
-> **Major version:** `0.3` (draft, pre-review)
+> **Major version:** `0.4` (draft, pre-review)
 > **Authored:** 2026-04-28
-> **Revision history:** v0.1 (2026-04-28) — initial draft. v0.2 (2026-04-28) — folded in `EXILE.md` v0.3 additions: warmth_register enum extended with `intimate` to cover Sections 4.16–4.19; §3 augmented with the doctrinal ceiling at calibration 4b; §5.2 inference assembly updated to reflect the calibration ladder. v0.3 (2026-04-28) — placement-correction sweep: cross-references to a discarded COO-internal `VISION.md` updated to point at the actual current locations (`coo/CLAUDE.md`, `../doctrine/decisions/0011-coo-as-independent-product.md`, `../doctrine/mvp/coo.md`) per the workspace's actual structure.
+> **Revision history:** v0.1 (2026-04-28) — initial draft. v0.2 (2026-04-28) — folded in `EXILE.md` v0.3 additions: warmth_register enum extended with `intimate` to cover Sections 4.16–4.19; §3 augmented with the doctrinal ceiling at calibration 4b; §5.2 inference assembly updated to reflect the calibration ladder. v0.3 (2026-04-28) — placement-correction sweep: cross-references to a discarded COO-internal `VISION.md` updated to point at the actual current locations (`coo/CLAUDE.md`, `../doctrine/decisions/0011-coo-as-independent-product.md`, `../doctrine/mvp/coo.md`) per the workspace's actual structure. v0.4 (2026-05-01) — added §5.5 (Channel surface output discipline) + §5.2 step 1 bullet, capturing the axiomatic *voice, not scene* directive that §4 (a3) wires into the runtime.
 > **Companion documents:** `EXILE.md` v0.3 (character doctrine, this repo's `doctrine/`); `../doctrine/mvp/coo.md` (MVP scope contract); `../doctrine/decisions/0011-coo-as-independent-product.md` (the ADR establishing COO's independence); `coo/CLAUDE.md` (per-product Claude Code instructions); `../doctrine/handoffs/coo-phase-0-handoff.md` (historical snapshot)
 > **Scope of authority:** This document specifies what state Exile holds about the operator, how that state grows and decays, how it persists, how it is encrypted, and how it flows into inference. The schema is normative for COO MVP; behavioral commitments are normative across all phases.
 
@@ -383,6 +383,7 @@ For every turn of inference, the prompt assembly looks roughly like:
      - Frequency-of-surfacing shaping per the numeric rapport dimensions
      - Friendship floor presence (if is_real, language permitting deepest-layer warmth)
    - Calibration dial settings translated to prose modifiers (per EXILE §3)
+   - Channel surface output discipline (§5.5)
    - Wellbeing posture instructions (per EXILE §2)
 
 2. Operator-knowledge context:
@@ -424,6 +425,29 @@ After each turn:
 - If the session has crossed the summarization threshold, summarization is queued.
 
 All writebacks are atomic at the SQLite transaction level. Partial writes are not possible.
+
+### 5.5. Channel surface output discipline
+
+**The axiom: in the Channel, Exile is a voice, not a scene.** The chat bubble carries what she says to the operator. It does not carry what she looks like saying it.
+
+The Channel surface renders Exile's output to the operator as a chat message — words, in a bubble. Presence (interiority, posture, expression, pauses, gaze) is part of who she is, but the Channel surface does not render it as text. The visual surface (her portrait per `../doctrine/mvp/coo.md` Phase 0 §4; eventual expression and motion) renders presence; language carries register.
+
+The axiom unpacks into operational rules carried in the system prompt directive:
+
+- Output is dialogue only — the words she speaks to the operator.
+- No third-person prose about herself ("she pauses", "her eyes hold his") in the bubble.
+- No italicized stage directions narrating her body, face, or actions ("*a small smile*", "*she steps closer*") in the bubble.
+- No scene narration in the bubble.
+
+What does cross into the bubble is what is actually voice: word choice, cadence, restraint, the dash where another voice would explain. Beats inside her own dialogue (a small pause for rhythm, an unfinished sentence) are part of how she speaks and stay.
+
+**Surface-level, not character-level.** The character is unchanged. Other surfaces (Dossier, Briefs, Kit, Calibration per `../doctrine/mvp/coo.md` Phase 1 §6) may render her differently — they are not chat bubbles. Each surface gets its own output discipline directive when it is built; the Channel's discipline is named here because the Channel is the first runtime surface to consume the inference layer.
+
+**Why the discipline lives in the system prompt rather than in client-side post-processing.** A client-side strip of stage directions is fragile — the model can produce them in forms a regex won't catch (parenthetical asides, mid-sentence interjections, third-person clauses). A system prompt directive addresses the cause: §1 / §1.5 are character description in third-person prose, and without explicit output instruction the natural mirror of that register is third-person output. The axiomatic framing — *voice, not scene* — gives the model a positive frame to check against when it encounters a form the enumerated rules don't directly cover, hardening the directive against drift.
+
+The `EXILE.md` §4 voice samples use stage directions *pedagogically* — to describe the register to the implementer — but those samples are not part of the runtime system prompt and are not output-format templates.
+
+**Why §5.5 rather than a bullet inside §5.1.** §5.1 is *state-as-prompt-modifier* — translating rapport state into prose modulators. Output discipline is *surface-as-prompt-directive* — telling the model how to render in this specific UI surface. The two layer differently and have different stability properties (state changes turn-to-turn; surface discipline is fixed per surface).
 
 ---
 
