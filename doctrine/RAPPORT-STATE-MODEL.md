@@ -3,9 +3,9 @@
 
 > **Stability tier: Schema spec is revisable as the project advances; the behavioral commitments — encryption at rest, no silent writes, state survives version updates, the friendship floor never erodes — are tied to the load-bearing rules in `EXILE.md` §2 and the product-specific rules in `coo/CLAUDE.md`, and do not move.** Field additions are expected and welcome. Semantic changes to existing fields require explicit migration discipline (§7).
 >
-> **Major version:** `0.4` (draft, pre-review)
+> **Major version:** `0.5` (draft, pre-review)
 > **Authored:** 2026-04-28
-> **Revision history:** v0.1 (2026-04-28) — initial draft. v0.2 (2026-04-28) — folded in `EXILE.md` v0.3 additions: warmth_register enum extended with `intimate` to cover Sections 4.16–4.19; §3 augmented with the doctrinal ceiling at calibration 4b; §5.2 inference assembly updated to reflect the calibration ladder. v0.3 (2026-04-28) — placement-correction sweep: cross-references to a discarded COO-internal `VISION.md` updated to point at the actual current locations (`coo/CLAUDE.md`, `../doctrine/decisions/0011-coo-as-independent-product.md`, `../doctrine/mvp/coo.md`) per the workspace's actual structure. v0.4 (2026-05-01) — added §5.5 (Channel surface output discipline) + §5.2 step 1 bullet, capturing the axiomatic *voice, not scene* directive that §4 (a3) wires into the runtime.
+> **Revision history:** v0.1 (2026-04-28) — initial draft. v0.2 (2026-04-28) — folded in `EXILE.md` v0.3 additions: warmth_register enum extended with `intimate` to cover Sections 4.16–4.19; §3 augmented with the doctrinal ceiling at calibration 4b; §5.2 inference assembly updated to reflect the calibration ladder. v0.3 (2026-04-28) — placement-correction sweep: cross-references to a discarded COO-internal `VISION.md` updated to point at the actual current locations (`coo/CLAUDE.md`, `../doctrine/decisions/0011-coo-as-independent-product.md`, `../doctrine/mvp/coo.md`) per the workspace's actual structure. v0.4 (2026-05-01) — added §5.5 (Channel surface output discipline) + §5.2 step 1 bullet, capturing the axiomatic *voice, not scene* directive that §4 (a3) wires into the runtime. v0.5 (2026-05-01) — documentary debt sweep: §6.6 updated to name XChaCha20-Poly1305 (the actual §2 (c) implementation) instead of `age`; §6.7 added (the lock key and the unlock sentinel) capturing the §3 (a) extensions; §6.8 added (in-memory hygiene of decrypted plaintext) naming the gap between cleartext-`Vec<u8>` returns and `Zeroizing`-wrapped key types.
 > **Companion documents:** `EXILE.md` v0.3 (character doctrine, this repo's `doctrine/`); `../doctrine/mvp/coo.md` (MVP scope contract); `../doctrine/decisions/0011-coo-as-independent-product.md` (the ADR establishing COO's independence); `coo/CLAUDE.md` (per-product Claude Code instructions); `../doctrine/handoffs/coo-phase-0-handoff.md` (historical snapshot)
 > **Scope of authority:** This document specifies what state Exile holds about the operator, how that state grows and decays, how it persists, how it is encrypted, and how it flows into inference. The schema is normative for COO MVP; behavioral commitments are normative across all phases.
 
@@ -494,7 +494,55 @@ Per the in-flight context handling rule in `coo/CLAUDE.md` Product-Specific Rule
 
 ### 6.6. The cryptographic library
 
-Recommendation: `age` (the format and the Rust crate `rage` or `age` for Tauri's Rust backend) for envelope encryption, `argon2` for KDF. Both are well-audited. Both compose cleanly with `serde` and `rusqlite`.
+The implementation uses **XChaCha20-Poly1305** for the AEAD envelope (the `chacha20poly1305` Rust crate) and **Argon2id** for the KDF (the `argon2` crate). Both are well-audited. Both compose cleanly with `serde` and `rusqlite`.
+
+This is a deliberate deviation from earlier drafts of this section, which named `age` for envelope encryption. `age`'s primary modes — X25519 keypairs or scrypt-from-passphrase — do not naturally accept the 32-byte HKDF-derived domain keys produced by §6.1 without either re-applying scrypt on every read (wasteful, doubles the KDF cost) or deriving an indirection X25519 keypair (extra abstraction layer for no security gain). The ChaCha20-Poly1305 family is the natural primitive for "AEAD given a 32-byte key" — same family used by Signal, WireGuard, TLS 1.3. The **X**ChaCha variant (24-byte nonce vs. plain ChaCha's 12) is chosen so random-per-call nonce generation is lifetime-safe without a per-key message counter or birthday-bound budgeting.
+
+**Bundle layout.** Each encrypted bundle is exactly:
+
+```
+4-byte magic    b"COOE"
+1-byte version  0x01
+1-byte aead id  0x02 (XChaCha20-Poly1305)
+24-byte nonce   (random per call)
+ciphertext      (length-equal-to-plaintext)
+16-byte tag     (Poly1305 authentication tag, appended to ciphertext)
+```
+
+The 6-byte header (magic + version + aead id) is bound as AAD on every encrypt and decrypt. This kills downgrade-style attacks that would swap leading bytes between formats, and establishes the AAD plumbing so future bundle versions can extend AAD with semantic identity (e.g. row-binding for the per-table BLOB columns introduced in §2) as a v2 bundle bump rather than a public-API change.
+
+**Failure modes.** Decryption is uniform-failure: framing checks (length, magic, version, aead id) yield a `MalformedBundle` error with a static reason string; everything else (tag mismatch, wrong key) collapses to a single `Aead` error. Tag-mismatch and wrong-key are not publicly distinguished, by design — distinguishing them would leak information useful to attackers on disk and is not needed by any legitimate caller. The unlock-boundary translation in §6.7 is the one place where this collapse is mapped to a more specific user-facing meaning, and even there the mapping respects §6.2's passphrase-not-stored rule.
+
+**What is unchanged from prior drafts.** Per-domain granularity (§6.1), Argon2id master-key derivation parameters (§6.2), HKDF-SHA256 per-domain derivation (§6.1), and the §6.3 / §6.4 plaintext/ciphertext split. Only the envelope crate and bundle layout change here.
+
+### 6.7. The lock key and the unlock sentinel
+
+Passphrase verification at startup needs a way to confirm "this passphrase derives the correct master key" without storing the passphrase or anything passphrase-equivalent on disk. The implementation introduces a primitive parallel to the four §1 state-domain keys: a *lock key*, used solely to encrypt a fixed sentinel plaintext that is decrypted on each unlock attempt.
+
+**The lock key.** Derived from the master key via HKDF-SHA256 with info string `coo/v1/lock` and salt `None`. Sibling to — not under — the four state-domain derivations: the `Domain` enum from §6.1 still enumerates exactly the four `RAPPORT-STATE-MODEL.md` §1 state domains (rapport, friendship_floor, operator_knowledge, conversation), and the lock key is a deliberately parallel construct because the lock is not state. Its info-string namespace is correspondingly distinct: `coo/v1/lock` versus `coo/v1/kdf/<domain>`.
+
+**The sentinel.** A fixed 16-byte ASCII plaintext, `COO-LOCK-SENT-01`, encrypted under the lock key using the §6.6 envelope. The resulting bundle (62 bytes total: 6-byte header + 24-byte nonce + 16-byte ciphertext + 16-byte tag) is written to `<coo_dir>/sentinel` at first-run setup and read at every subsequent unlock attempt. The `-01` suffix in the plaintext is a rotation hedge: a future doctrine version that needs a deliberate sentinel rotation can change the constant unambiguously.
+
+The sentinel is not encrypted *state*. It carries no information beyond "the operator's passphrase derives the correct master key." Its presence on disk is the structural complement to the salt at `<coo_dir>/salt` (§6.2): one file lets the master key be re-derived; the other lets that derivation be verified.
+
+**The unlock-boundary error translation.** The §6.6 envelope layer fails uniformly: `MalformedBundle(&'static str)` for framing failures; `Aead` for everything else (tag mismatch, wrong key, both indistinguishable). The vault unlock layer translates these once, at the boundary where the sentinel is decrypted, into user-facing meanings:
+
+- `Aead → UnlockError::WrongPassphrase` — the sentinel did not authenticate. The user-facing meaning of this failure is "wrong passphrase," and translating here lets the UI surface that directly. A tampered sentinel file therefore reads to the operator as `WrongPassphrase`; we cannot distinguish wrong-key from tag-mismatch without storing more, and storing more breaks §6.2's passphrase-not-stored rule. Accepted.
+- `MalformedBundle → UnlockError::Inconsistent` — the sentinel file's framing did not parse. The operator-facing meaning is "the on-disk state is corrupted," distinct from "wrong passphrase," and the surface should render distinctly.
+
+The translation lives at this single boundary. The envelope layer keeps its uniform collapse, which means any other consumer of the crypto layer (e.g. the §6.3 encrypted-column tables) inherits the same uniform failure mode and applies its own boundary translation if needed.
+
+### 6.8. In-memory hygiene of decrypted plaintext
+
+The encryption substrate uses `Zeroizing`-wrapped types for key material: the `MasterKey` is a `Zeroizing<[u8; 32]>` newtype with no `Debug`, no `Clone`, no public constructor, and `expose_secret` as the only access path; per-domain `DomainKey` values are likewise wrapped. This protects key material from lingering in memory after its useful lifetime.
+
+Decrypted *plaintext* does not currently receive the same treatment. `crypto::envelope::decrypt` returns a plain `Vec<u8>`, which means callers receive an unwrapped allocation that is not zeroed on drop. Sections §6.3 and §6.5 cover what is encrypted at rest and what crosses the wire respectively; neither addresses the in-memory hygiene of post-decryption plaintext.
+
+This is named here as a known constraint, not an enforced invariant. Callers (the operator-knowledge surfaces in §3, conversation persistence in §4, future Dossier / Briefs / Kit surfaces in `mvp/coo.md` Phase 1 §6) inherit the constraint silently otherwise. The current posture is:
+
+- Decrypted plaintext is held only as long as needed by its consumer (a render call, an inference request, a transient comparison). Callers do not stash decrypted blobs in long-lived caches or background buffers.
+- For values that should not appear in process-memory snapshots after their use (e.g. an operator-knowledge entry being reviewed in the Dossier, a conversation turn being prepared for inference assembly), the responsibility is on the caller to bound the lifetime tightly.
+- The substrate does not enforce this through types. A future improvement is to return a wrapped type — `Zeroizing<Vec<u8>>` or a distinct `DecryptedPayload` newtype with `expose_secret`-style access — which would lift the responsibility from caller discipline to type-system discipline. That improvement is folded into a future doctrine bump if and when implemented; until then, the constraint is operator-visible at this section rather than hidden inside `crypto::envelope::decrypt`'s signature.
 
 ---
 
