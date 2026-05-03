@@ -2,7 +2,7 @@
 
 Personal, single-operator AI companion application — native desktop, local-first, multi-year horizon. The centerpiece is the operator-facing AI named **Exile**, defined permanently in `doctrine/EXILE.md`.
 
-COO is an independent product in the workspace per [ADR-0011](../doctrine/decisions/0011-coo-as-independent-product.md), peer to `dobackbone/`, `fom/`, and `command-flow/`. It consumes the shared workspace doctrine in `../doctrine/` and ships its own product-local agent doctrine in `doctrine/` (this repo).
+COO is an independent product in the workspace per [ADR-0011 (The Personal-Commander Tier)](../doctrine/decisions/0011-personal-commander-tier.md), peer to `dobackbone/`, `fom/`, and `command-flow/`. It consumes the shared workspace doctrine in `../doctrine/` and ships its own product-local agent doctrine in `doctrine/` (this repo).
 
 ## Status
 
@@ -12,7 +12,7 @@ COO is an independent product in the workspace per [ADR-0011](../doctrine/decisi
 |---|---|
 | `doctrine/EXILE.md` | v0.3 complete |
 | `doctrine/RAPPORT-STATE-MODEL.md` | v0.5 complete |
-| `../doctrine/decisions/0011-coo-as-independent-product.md` | Accepted |
+| `../doctrine/decisions/0011-personal-commander-tier.md` | Accepted |
 | `../doctrine/mvp/coo.md` | Committed (doctrine c170f73) |
 | Tauri vs. Electron | Decided — Tauri |
 | AI runtime | Decided — Anthropic Claude API + abstraction |
@@ -36,7 +36,7 @@ If you are landing in this repository — a new Claude Code session, a different
 2. **`doctrine/EXILE.md`** — the character. Sections 1 and 1.5 are the operator's verbatim writing and are permanent at finalization.
 3. **`doctrine/RAPPORT-STATE-MODEL.md`** — the schema and behavior spec for Exile's state across sessions.
 4. **`../doctrine/mvp/coo.md`** — the MVP scope contract.
-5. **`../doctrine/decisions/0011-coo-as-independent-product.md`** — the ADR establishing COO's independence in the workspace.
+5. **`../doctrine/decisions/0011-personal-commander-tier.md`** — the ADR establishing the personal-commander tier and COO's place in it.
 6. **`../doctrine/CLAUDE.md`** — ecosystem-wide Claude Code instructions; binding above this repo's `CLAUDE.md`.
 7. **`../doctrine/handoffs/coo-phase-0-handoff.md`** — historical snapshot of Phase 0 design state.
 
