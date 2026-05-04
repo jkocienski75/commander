@@ -37,7 +37,9 @@ Per `../doctrine/ARCHITECTURE.md` §1:
 
 ## Current State
 
-**Repo cleared for fresh start.** COO content has been removed (COO relocated to its own repo). Commander scaffolding has not yet been created.
+**Repo cleared and committed (2026-05-03).** COO content removed and pushed to origin; COO relocated to its own repo. Commander scaffolding has not yet been created.
+
+Next design work: resolve open design items (sync-model spec, chief-of-staff doctrine, personal-tier aide interface) before implementation.
 
 ## Open Design Items (v0.2 Commander Design)
 

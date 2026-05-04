@@ -4,7 +4,9 @@ The commercial expression of the personal-commander tier — the operator's high
 
 ## Status
 
-**Pre-scaffolding.** Repo cleared for fresh start. See `../doctrine/mvp/commander.md` for the MVP scope contract and `../doctrine/decisions/0011-personal-commander-tier.md` for the architectural framing.
+**Pre-scaffolding (2026-05-03).** Repo cleared and committed. COO content removed; COO relocated to its own repo. See `../doctrine/mvp/commander.md` for the MVP scope contract and `../doctrine/decisions/0011-personal-commander-tier.md` for the architectural framing.
+
+**Next:** Resolve open design items (sync-model spec, chief-of-staff doctrine) before scaffolding.
 
 ## What This Product Is
 
