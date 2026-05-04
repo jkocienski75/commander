@@ -1,0 +1,30 @@
+# Commander development compose file
+# Start with: docker compose up --build
+#
+# Ports per doctrine/docker/PORTS.md:
+#   8200 - Commander backend HTTP
+#   8201 - JVM debugger (JDWP)
+#   8202 - Spring Actuator
+
+services:
+  commander:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: commander
+    ports:
+      - "8200:8200"   # Backend HTTP
+      - "8201:8201"   # JVM debugger
+      - "8202:8202"   # Actuator
+    environment:
+      # Enable JDWP for remote debugging
+      JAVA_TOOL_OPTIONS: >-
+        -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:8201
+      # Spring profile
+      SPRING_PROFILES_ACTIVE: dev
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8202/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 3

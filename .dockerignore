@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE / Editor
+.idea
+.vscode
+*.iml
+*.iws
+*.ipr
+
+# Build outputs (we build inside the container)
+target/
+**/target/
+
+# Documentation / meta (not needed at runtime)
+README.md
+CLAUDE.md
+*.md
+
+# CI/CD
+.github/
+
+# Environment / secrets (never copy into images)
+.env
+.env.*
+
+# Maven wrapper jar (downloaded during build)
+.mvn/wrapper/maven-wrapper.jar
+
+# Logs
+*.log
+logs/
+
+# OS junk
+.DS_Store
+Thumbs.db
