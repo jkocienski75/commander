@@ -5,13 +5,14 @@
 #   8200 - Commander backend HTTP
 #   8201 - JVM debugger (JDWP)
 #   8202 - Spring Actuator
+#   8210 - Commander frontend dev server
 
 services:
-  commander:
+  commander-backend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: commander
+    container_name: commander-backend
     ports:
       - "8200:8200"   # Backend HTTP
       - "8201:8201"   # JVM debugger
@@ -28,3 +29,17 @@ services:
       timeout: 3s
       start_period: 30s
       retries: 3
+
+  commander-ui:
+    build:
+      context: ./commander-ui
+      dockerfile: Dockerfile
+      target: dev
+    container_name: commander-ui
+    ports:
+      - "8210:8210"   # Frontend dev server
+    environment:
+      - VITE_API_URL=http://commander-backend:8200
+    depends_on:
+      commander-backend:
+        condition: service_healthy
